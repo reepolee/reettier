@@ -40,6 +40,7 @@ struct Frame {
     last_semicolon_k: Option<usize>,
     force_explode: bool,
     explode: bool,
+    open_k: usize,
     close_k: Option<usize>,
     /// Never a comma group regardless of contents — used for CSS `{}` rule
     /// blocks, which are always declaration blocks, never object literals.
@@ -203,6 +204,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                         last_semicolon_k: None,
                         force_explode: false,
                         explode: false,
+                        open_k: k,
                         close_k: None,
                         never_group: css && bchar(k) == b'{',
                         stmt_block: is_stmt_block_brace(k, &kind, &text, &bchar),
@@ -503,6 +505,21 @@ fn decide_gap(
             return (0, bchar(k) == b'}', false);
         }
     }
+    // B2) cur is a *trailing* statement-block closer `}` — a `}` closing a block
+    // that was opened on an earlier line, sitting after content on its own line.
+    // Peel it onto its own line (emit dedents any Close to its opener's level).
+    // This mirrors the `.ree` trailing-closer split; whatever the author kept
+    // after the `}` (`else {`, `catch (e) {`, `while (cond);`) stays attached,
+    // because those following tokens keep their same-line (non-break) gap.
+    if let Some(fid) = close_frame[k] {
+        if bchar(k) == b'}' && frames[fid].stmt_block && !frames[fid].is_group() {
+            let open_k = frames[fid].open_k;
+            let multiline = open_k + 1 < gap_nl.len() && gap_nl[open_k + 1] > 0;
+            if multiline && gap_nl[k] == 0 {
+                return (1, false, true);
+            }
+        }
+    }
     // C) prev is a top-level *group* comma (not dropped). A comma in a non-group
     // frame (e.g. a CSS value list inside a rule block) falls through to D/E so
     // the author's layout is preserved.
@@ -621,6 +638,9 @@ fn emit(items: &[Out], indent: &str) -> String {
     let mut pending_open: Option<usize> = None;
     let mut cur_line_level: usize = 0;
     let mut at_line_start = true;
+    // Whether the previous significant code token ended a statement (`{`, `}`, `;`),
+    // so a line starting here is a *fresh statement* rather than a continuation.
+    let mut prev_boundary = false;
 
     for it in items {
         // Resolve the previous open's indent decision from whether we break now.
@@ -642,7 +662,14 @@ fn emit(items: &[Out], indent: &str) -> String {
                 stack.last().map(|b| b.open_line_level).unwrap_or(0)
             } else if it.forced {
                 structural
+            } else if prev_boundary {
+                // Fresh statement (prev token was `{`/`}`/`;`): re-indent to
+                // structural depth, correcting author over-indent (Rule 2).
+                structural
             } else {
+                // Continuation line (method chain, `case:` body, label): the
+                // author's extra indent is intentional and has no structural
+                // signal, so keep it as a floor.
                 structural.max(it.author_level)
             };
             cur_line_level = level;
@@ -674,6 +701,16 @@ fn emit(items: &[Out], indent: &str) -> String {
             }
             _ => {}
         }
+
+        // Track the statement-boundary state for the *next* line's indent choice.
+        // Comments are neutral — they keep the boundary of the last code token.
+        prev_boundary = match it.kind {
+            TokKind::LineComment | TokKind::BlockComment => prev_boundary,
+            TokKind::Semicolon => true,
+            TokKind::Open => it.text == "{",
+            TokKind::Close => it.text == "}",
+            _ => false,
+        };
     }
 
     // File-level cleanup: trim leading blank lines, ensure single trailing newline.
@@ -814,6 +851,48 @@ mod tests {
         let out = fmt(input);
         // The generic comma must not become an element boundary.
         assert!(out.contains("cast<A, B>()"), "generic split:\n{out}");
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn trailing_close_brace_peels_onto_own_line() {
+        // The reported case: trailing `}` closers are peeled onto their own line
+        // and the statement is pulled back to structural depth.
+        let input = "if (typeof data === \"string\") {\n\t\t\tentries.s = data; } else {\n\t\t\t\tentries = data; }\n";
+        let expected = "if (typeof data === \"string\") {\n\tentries.s = data;\n} else {\n\tentries = data;\n}\n";
+        assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn trailing_close_brace_try_catch_finally() {
+        let input = "try {\n\ta(); } catch (e) {\n\tb(); } finally {\n\tc(); }\n";
+        let expected = "try {\n\ta();\n} catch (e) {\n\tb();\n} finally {\n\tc();\n}\n";
+        assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn trailing_close_brace_do_while() {
+        let input = "do {\n\tstep(); } while (cond);\n";
+        let expected = "do {\n\tstep();\n} while (cond);\n";
+        assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn trailing_close_brace_nested() {
+        let input = "function f() {\n\tif (x) {\n\t\ta(); } }\n";
+        let expected = "function f() {\n\tif (x) {\n\t\ta();\n\t}\n}\n";
+        assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn inline_block_not_peeled() {
+        // A block whose `{` and `}` are on the same line is left inline (Rule 1).
+        let input = "if (x) { a(); }\n";
+        assert_eq!(fmt(input), input);
         assert_idempotent(input);
     }
 
