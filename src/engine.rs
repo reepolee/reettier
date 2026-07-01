@@ -638,8 +638,11 @@ fn emit(items: &[Out], indent: &str) -> String {
     let mut pending_open: Option<usize> = None;
     let mut cur_line_level: usize = 0;
     let mut at_line_start = true;
-    // Whether the previous significant code token ended a statement (`{`, `}`, `;`),
-    // so a line starting here is a *fresh statement* rather than a continuation.
+    // Whether the previous significant code token was a block-opening `{`, so a
+    // line starting here is the first statement of a fresh block (its structural
+    // depth is authoritative). Only `{` qualifies: after `;` or `}` a line is a
+    // sibling inside whatever indent context is active (e.g. a `case:` body, or
+    // code following a nested block), where the author's indent must be kept.
     let mut prev_boundary = false;
 
     for it in items {
@@ -663,8 +666,8 @@ fn emit(items: &[Out], indent: &str) -> String {
             } else if it.forced {
                 structural
             } else if prev_boundary {
-                // Fresh statement (prev token was `{`/`}`/`;`): re-indent to
-                // structural depth, correcting author over-indent (Rule 2).
+                // First statement of a fresh block (prev token was `{`): re-indent
+                // to structural depth, correcting author over-indent (Rule 2).
                 structural
             } else {
                 // Continuation line (method chain, `case:` body, label): the
@@ -702,13 +705,12 @@ fn emit(items: &[Out], indent: &str) -> String {
             _ => {}
         }
 
-        // Track the statement-boundary state for the *next* line's indent choice.
-        // Comments are neutral — they keep the boundary of the last code token.
+        // Track the block-open state for the *next* line's indent choice. Only a
+        // `{` marks a fresh block; comments are neutral (they keep the last code
+        // token's state, so `{ // note` still opens a block for the next line).
         prev_boundary = match it.kind {
             TokKind::LineComment | TokKind::BlockComment => prev_boundary,
-            TokKind::Semicolon => true,
             TokKind::Open => it.text == "{",
-            TokKind::Close => it.text == "}",
             _ => false,
         };
     }
@@ -885,6 +887,15 @@ mod tests {
         let input = "function f() {\n\tif (x) {\n\t\ta(); } }\n";
         let expected = "function f() {\n\tif (x) {\n\t\ta();\n\t}\n}\n";
         assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn switch_multi_statement_case_body_keeps_indent() {
+        // Regression: a `break;` (or any 2nd+ statement) in a case body follows a
+        // `;`, but must keep the case body's author indent, not drop to structural.
+        let input = "switch (fmt) {\n\tcase \"a\":\n\tcase \"b\":\n\t\tx = 1;\n\t\tbreak;\n\tdefault:\n\t\treturn null;\n}\n";
+        assert_eq!(fmt(input), input, "case body statement de-indented");
         assert_idempotent(input);
     }
 
