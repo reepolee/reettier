@@ -232,7 +232,7 @@ foreach ($t in $targets) {
 
 if ($doBump) {
     Write-Host "`n→ Committing version bump..."
-    git add Cargo.toml CHANGELOG.md
+    git add Cargo.toml Cargo.lock CHANGELOG.md
     if ($LASTEXITCODE -ne 0) { Write-Error "git add failed"; exit 1 }
     git commit -m "Bump version to $version"
     if ($LASTEXITCODE -ne 0) { Write-Error "git commit failed"; exit 1 }
