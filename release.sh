@@ -332,7 +332,7 @@ done
 if [ "$do_bump" = true ]; then
 	echo ""
 	echo "→ Committing version bump..."
-	git add Cargo.toml CHANGELOG.md
+	git add Cargo.toml Cargo.lock CHANGELOG.md
 	git commit -m "Bump version to $version"
 	echo "  Committed: Bump version to $version"
 fi
