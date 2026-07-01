@@ -4,9 +4,10 @@
 //!   1. **Embedded code** — raw JS `{{ … }}`, `<script>` JS, `<style>` CSS are
 //!      reformatted by the JS/CSS engines and re-indented to their base column.
 //!      `<pre>`/`<textarea>`/`<!-- -->` are kept verbatim.
-//!   2. **Markup indentation** — every line is re-indented by its HTML-tag and
-//!      Ree-directive nesting depth, using `max(structural, author)` so correct
-//!      author indentation (and multi-line continuations) survive.
+//!   2. **Markup indentation** — every line is re-indented to its HTML-tag and
+//!      Ree-directive structural nesting depth (Rule 2), correcting both under-
+//!      and over-indentation. The author indent is used only as a floor for
+//!      broken-tag attribute continuations, which have no structural signal.
 //!
 //! Implementation: mask each embedded/verbatim block to a one-line placeholder,
 //! indent the resulting markup line-by-line, then expand the placeholders at the
@@ -212,9 +213,13 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
 
     let lines: Vec<&str> = masked.split('\n').collect();
     for (li, raw) in lines.iter().enumerate() {
-        let trimmed = raw.trim_start();
         let author_ws: String = raw.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
         let author = author_level(&author_ws, indent);
+        // Tier-1 "trim & space": strip trailing whitespace, then collapse
+        // inter-tag whitespace runs on the line. (Leading whitespace is the
+        // author indent, re-applied structurally below.)
+        let collapsed = collapse_inter_tag(raw.trim());
+        let trimmed = collapsed.as_str();
 
         if trimmed.is_empty() {
             // keep blank line
@@ -236,8 +241,13 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
             // Analyze the *head* only. When there is nothing to split,
             // `head == trimmed`, so this is identical to the old behaviour.
             let (leading_closers, opens, closes, pending) = analyze_line(head);
+            // Rule 2: indentation = structural nesting depth, re-applied. The
+            // structural level wins in both directions — over-indented lines are
+            // pulled back in, not preserved. (`author` is still the floor for
+            // broken-tag attribute continuations in the `in_tag` branch, which
+            // have no structural signal of their own.)
             let line_level = (depth - leading_closers as i32).max(0) as usize;
-            let level = line_level.max(author);
+            let level = line_level;
             let base = indent.repeat(level);
 
             if trailing.is_empty() || pending.is_some() {
@@ -523,6 +533,70 @@ fn split_trailing_closers(line: &str) -> (&str, Vec<&str>) {
         }
         None => (line, Vec::new()),
     }
+}
+
+/// Collapse a run of whitespace that sits **between** two markup tokens — an
+/// HTML tag or ree directive close (`>` / `}`) on the left and an open (`<` /
+/// `{`) on the right — down to a single space. This is the inter-tag part of
+/// Tier-1 "trim & space": HTML renders any run of ASCII whitespace as a single
+/// space, so this is a whitespace-only, render-preserving normalization.
+///
+/// Whitespace inside tags, directives, and quoted attributes is skipped (tags
+/// and directives are copied as opaque units via `tag_end` / `brace_end`), and
+/// any run that touches a non-tag character (text, or a masked-block
+/// placeholder) is left exactly as-is — so text content and embedded blocks are
+/// never disturbed.
+fn collapse_inter_tag(line: &str) -> String {
+    let b = line.as_bytes();
+    let n = b.len();
+    let mut out = String::with_capacity(n);
+    let mut i = 0usize;
+    let mut prev_is_close = false; // last emitted token ended with `>` or `}`
+
+    while i < n {
+        let c = b[i];
+
+        // HTML tag `<…>` or `</…>` — copy verbatim (quotes handled by tag_end).
+        if c == b'<' && i + 1 < n && (b[i + 1] == b'/' || b[i + 1].is_ascii_alphabetic()) {
+            let end = tag_end(line, i);
+            out.push_str(&line[i..end]);
+            prev_is_close = b[end - 1] == b'>';
+            i = end;
+            continue;
+        }
+
+        // Ree directive `{…}` — copy verbatim (quotes handled by brace_end).
+        if c == b'{' && i + 1 < n {
+            let end = brace_end(line, i);
+            out.push_str(&line[i..end]);
+            prev_is_close = b[end - 1] == b'}';
+            i = end;
+            continue;
+        }
+
+        // Whitespace run: collapse only when framed by close→open.
+        if c == b' ' || c == b'\t' {
+            let mut j = i;
+            while j < n && (b[j] == b' ' || b[j] == b'\t') {
+                j += 1;
+            }
+            let next_is_open = j < n && (b[j] == b'<' || b[j] == b'{');
+            if prev_is_close && next_is_open {
+                out.push(' ');
+            } else {
+                out.push_str(&line[i..j]);
+            }
+            i = j;
+            continue;
+        }
+
+        // Any other char (text, placeholder) → content, breaks the close state.
+        let l = utf8_len(c);
+        out.push_str(&line[i..i + l]);
+        prev_is_close = false;
+        i += l;
+    }
+    out
 }
 
 /// If a continuation line closes its pending tag, return `Some(self_closing)`.
@@ -922,5 +996,51 @@ mod tests {
         // No content before the closer → existing leading-closer path handles it.
         let input = "{#if a}\n<p>1</p>\n{/if}\n";
         assert_eq!(fmt(input), "{#if a}\n\t<p>1</p>\n{/if}\n");
+    }
+
+    #[test]
+    fn inter_tag_whitespace_collapses() {
+        // Balanced block on one line stays one line (Rule 1), but the inter-tag
+        // tab/space runs collapse to a single space (Tier-1 trim & space).
+        let input = "<ul>\n{#each xs as x}\t\t\t<li>a</li>\t\t\t{/each}\n</ul>\n";
+        let expected = "<ul>\n\t{#each xs as x} <li>a</li> {/each}\n</ul>\n";
+        assert_eq!(fmt(input), expected);
+    }
+
+    #[test]
+    fn inter_tag_collapse_is_idempotent() {
+        let once = fmt("<ul>\n{#each xs as x}\t\t<li>a</li>\t\t{/each}\n</ul>\n");
+        assert_eq!(fmt(&once), once);
+    }
+
+    #[test]
+    fn text_whitespace_preserved() {
+        // Whitespace inside text content is not inter-tag → untouched.
+        let input = "<p>hello   world</p>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn whitespace_inside_attribute_preserved() {
+        // A `>`/whitespace/`<` sequence inside a quoted attribute must not be
+        // treated as inter-tag.
+        let input = "<a title=\"a >   < b\">x</a>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn over_indented_lines_pulled_back() {
+        // Rule 2: structural depth wins in both directions — over-indented lines
+        // are corrected, not preserved.
+        let input = "{#each xs as x}\n\t\t\t\t\t<li>a</li>\n\t\t\t\t\t\t\t\t{/each}\n";
+        let expected = "{#each xs as x}\n\t<li>a</li>\n{/each}\n";
+        assert_eq!(fmt(input), expected);
+    }
+
+    #[test]
+    fn trailing_whitespace_trimmed() {
+        // Rule 3: trailing whitespace is stripped.
+        let input = "<div>   \n\t<p>x</p>\t\n</div>\n";
+        assert_eq!(fmt(input), "<div>\n\t<p>x</p>\n</div>\n");
     }
 }
