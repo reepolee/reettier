@@ -30,12 +30,14 @@ struct Out {
 
 struct Frame {
     has_comma: bool,
-    /// A top-level `;` inside this bracket → it's a statement block or a
-    /// multi-declarator, never a comma group (so `let a = 1, b = 2;` and blocks
-    /// containing `;` are not exploded/collapsed).
     has_semicolon: bool,
     first_comma_k: Option<usize>,
     last_comma_k: Option<usize>,
+    /// Semicolon positions are tracked for `;`-delimited "groups" (type/interface
+    /// members) to apply the same first-boundary switch as comma groups. Only
+    /// meaningful when `has_semicolon && !has_comma`.
+    first_semicolon_k: Option<usize>,
+    last_semicolon_k: Option<usize>,
     force_explode: bool,
     explode: bool,
     close_k: Option<usize>,
@@ -46,7 +48,23 @@ struct Frame {
 
 impl Frame {
     fn is_group(&self) -> bool {
+        // A group is delimited by exactly ONE kind of separator: commas OR
+        // semicolons, never both. A frame with both (a multi-declarator like
+        // `let a = 1, b = 2;`, or a sequence expression `a = 1, b = 2;`) is not a
+        // group — its comma isn't a member boundary.
+        !self.never_group && (self.has_comma ^ self.has_semicolon)
+    }
+
+    fn is_comma_group(&self) -> bool {
         self.has_comma && !self.has_semicolon && !self.never_group
+    }
+
+    fn first_delim_k(&self) -> Option<usize> {
+        self.first_comma_k.or(self.first_semicolon_k)
+    }
+
+    fn last_delim_k(&self) -> Option<usize> {
+        self.last_comma_k.or(self.last_semicolon_k)
     }
 }
 
@@ -125,6 +143,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
     let mut open_frame: Vec<Option<usize>> = vec![None; m];
     let mut close_frame: Vec<Option<usize>> = vec![None; m];
     let mut comma_frame: Vec<Option<usize>> = vec![None; m];
+    let mut semicolon_frame: Vec<Option<usize>> = vec![None; m];
     // Pass 1: match real brackets `()[]{}` only.
     {
         let mut stack: Vec<usize> = Vec::new();
@@ -137,6 +156,8 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                         has_semicolon: false,
                         first_comma_k: None,
                         last_comma_k: None,
+                        first_semicolon_k: None,
+                        last_semicolon_k: None,
                         force_explode: false,
                         explode: false,
                         close_k: None,
@@ -192,6 +213,11 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                 TokKind::Semicolon => {
                     if let Some(&id) = stack.last() {
                         frames[id].has_semicolon = true;
+                        if frames[id].first_semicolon_k.is_none() {
+                            frames[id].first_semicolon_k = Some(k);
+                        }
+                        frames[id].last_semicolon_k = Some(k);
+                        semicolon_frame[k] = Some(id);
                     }
                 }
                 TokKind::LineComment => {
@@ -210,7 +236,8 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
             f.explode = false;
             continue;
         }
-        let fc = f.first_comma_k.unwrap();
+        // Use the first delimiter (comma or semicolon) to decide the group's shape.
+        let fc = f.first_delim_k().unwrap();
         let nl_after = if fc + 1 < m { gap_nl[fc + 1] } else { 0 };
         let nl_before = gap_nl[fc];
         f.explode = f.force_explode || nl_after > 0 || nl_before > 0;
@@ -237,17 +264,19 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
             &open_frame,
             &close_frame,
             &comma_frame,
+            &semicolon_frame,
             &frames,
             &gap_nl,
             &gap_sp,
         );
 
-        // Insert a synthetic trailing comma for an exploding group. It must go
+        // Insert a synthetic trailing comma for an exploding comma-group. It must go
         // *after the last code token* — before any trailing comment(s) — so it
         // never lands inside a `//` comment, and not if one is already there.
+        // Semicolon groups don't get trailing semicolons (they're already terminators).
         // CSS forbids trailing commas (e.g. in rgba()/selector lists), so skip.
         if let Some(fid) = close_frame[k] {
-            if !css && is_group(fid) && explodes(fid) && !last_elem_is_rest(&frames[fid], m, &kind, &text) {
+            if !css && frames[fid].is_comma_group() && explodes(fid) && !last_elem_is_rest(&frames[fid], m, &kind, &text) {
                 let mut ins = items.len();
                 while ins > 0
                     && matches!(items[ins - 1].kind, TokKind::LineComment | TokKind::BlockComment)
@@ -390,6 +419,7 @@ fn decide_gap(
     open_frame: &[Option<usize>],
     close_frame: &[Option<usize>],
     comma_frame: &[Option<usize>],
+    semicolon_frame: &[Option<usize>],
     frames: &[Frame],
     gap_nl: &[usize],
     gap_sp: &[bool],
@@ -438,6 +468,33 @@ fn decide_gap(
                 return (blank, false, true);
             }
             return (0, true, false); // one space after comma when inline
+        }
+    }
+
+    // C') prev is a top-level *group* semicolon. Semicolons in semicolon-delimited
+    // groups (type/interface members) explode/collapse the same way commas do.
+    if let Some(fid) = semicolon_frame[prev] {
+        if frames[fid].is_group() {
+            if explodes(fid) {
+                return (blank, false, true);
+            }
+            return (0, true, false); // one space after semicolon when inline
+        }
+    }
+
+    // C'') prev is a trailing comment that sits between a group delimiter and the
+    // next element (e.g. `title: string; /** doc */ prepend?: …`). The comment
+    // stays on the previous line (handled above), but the element after it is a
+    // new member — so honor the group's explode by breaking here.
+    if matches!(kind(prev), TokKind::LineComment | TokKind::BlockComment) {
+        let mut p = prev;
+        while p > 0 && matches!(kind(p), TokKind::LineComment | TokKind::BlockComment) {
+            p -= 1;
+        }
+        if let Some(fid) = comma_frame[p].or(semicolon_frame[p]) {
+            if frames[fid].is_group() && explodes(fid) {
+                return (blank, false, true);
+            }
         }
     }
 
