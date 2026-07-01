@@ -1,0 +1,6 @@
+/target/
+
+# Release binaries left in the project root by release.sh / release.ps1
+reettier-linux-*
+reettier-macos-*
+reettier-windows-*.exe
