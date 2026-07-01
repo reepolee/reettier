@@ -48,6 +48,10 @@ struct Frame {
     /// …). Its `;`s are statement terminators, not member separators, so it is
     /// never a semicolon group — only type/interface literals are.
     stmt_block: bool,
+    /// Whether the opening bracket is `{`. Semicolon groups (type/interface member
+    /// lists) exist only in braces; `;` inside `()` (a `for` header) or `[]` is a
+    /// statement separator, not a member boundary.
+    brace: bool,
 }
 
 impl Frame {
@@ -64,9 +68,10 @@ impl Frame {
         if self.has_comma {
             return true; // comma group (call args, array, object literal)
         }
-        // Semicolon group — only for type/interface member lists, never for
-        // statement blocks (where `;` terminates statements, not members).
-        self.has_semicolon && !self.stmt_block
+        // Semicolon group — only for type/interface member lists inside braces,
+        // never a statement block (where `;` terminates statements) nor a `for`
+        // header `(…;…;…)` / `[]` (where `;` is a statement separator).
+        self.has_semicolon && self.brace && !self.stmt_block
     }
 
     fn is_comma_group(&self) -> bool {
@@ -201,6 +206,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                         close_k: None,
                         never_group: css && bchar(k) == b'{',
                         stmt_block: is_stmt_block_brace(k, &kind, &text, &bchar),
+                        brace: bchar(k) == b'{',
                     });
                     open_frame[k] = Some(id);
                     stack.push(id);
@@ -578,8 +584,10 @@ fn space_rule(
     if ck == TokKind::Comma || ck == TokKind::Semicolon {
         return false;
     }
-    // One space after a comma/semicolon.
-    if pk == TokKind::Comma || pk == TokKind::Semicolon {
+    // One space after a comma/semicolon — but not right before a closing bracket
+    // (e.g. `for (;;)`, or a dropped trailing comma). A trailing `;` before `}` is
+    // handled by the brace rule below, which still gives `{ a; }` its inner space.
+    if (pk == TokKind::Comma || pk == TokKind::Semicolon) && ck != TokKind::Close {
         return true;
     }
     // Inside brackets: braces get an inner space, `(`/`[` do not.
@@ -899,6 +907,28 @@ mod tests {
         assert_eq!(fmt(arrow), arrow, "arrow body collapsed");
         let if_body = "if (x) {\n\tif (y) a++; else b++;\n}\n";
         assert_eq!(fmt(if_body), if_body, "if body collapsed");
+    }
+
+    #[test]
+    fn for_header_is_not_a_semicolon_group() {
+        // The `;`s in a `for (…;…;…)` header are statement separators, not member
+        // boundaries — the header must never explode one-clause-per-line.
+        let compact = "for (let i = 0; i < n; i++) {\n\tx();\n}\n";
+        assert_eq!(fmt(compact), compact, "compact for-header changed");
+        // Author-broken header is preserved (never auto-collapse or explode).
+        let broken = "for (let i = 0;\ni < n; i++) {\n\tx();\n}\n";
+        let out = fmt(broken);
+        assert!(!out.contains("let i = 0;\n\ti < n;\n"), "for-header exploded:\n{out}");
+        assert_idempotent(broken);
+        // Empty header: no space injected before the `)`.
+        let empty = "for (;;) {\n\tx();\n}\n";
+        assert_eq!(fmt(empty), empty, "for(;;) got a stray space");
+    }
+
+    #[test]
+    fn trailing_semicolon_keeps_brace_inner_space() {
+        // A `;` right before `}` still yields the brace's inner space, not `;)`.
+        assert_eq!(fmt("type T = { a: string; };\n"), "type T = { a: string; };\n");
     }
 
     #[test]
