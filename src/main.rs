@@ -178,9 +178,10 @@ fn format_one(path: &Path, mode: Mode, config: &Config) -> Result<bool, String> 
     match mode {
         Mode::Write => {
             std::fs::write(path, &formatted).map_err(|e| e.to_string())?;
+            eprintln!("Formatted: {}", path.display());
         }
         Mode::Check => {
-            println!("would reformat: {}", path.display());
+            eprintln!("Would format: {}", path.display());
         }
         Mode::Diff => {
             print_diff(&path.display().to_string(), &original, &formatted);
