@@ -44,15 +44,29 @@ struct Frame {
     /// Never a comma group regardless of contents — used for CSS `{}` rule
     /// blocks, which are always declaration blocks, never object literals.
     never_group: bool,
+    /// A `{}` in statement-block position (after `)`, `=>`, `else`, a bare block,
+    /// …). Its `;`s are statement terminators, not member separators, so it is
+    /// never a semicolon group — only type/interface literals are.
+    stmt_block: bool,
 }
 
 impl Frame {
     fn is_group(&self) -> bool {
-        // A group is delimited by exactly ONE kind of separator: commas OR
-        // semicolons, never both. A frame with both (a multi-declarator like
-        // `let a = 1, b = 2;`, or a sequence expression `a = 1, b = 2;`) is not a
-        // group — its comma isn't a member boundary.
-        !self.never_group && (self.has_comma ^ self.has_semicolon)
+        if self.never_group {
+            return false;
+        }
+        // A group is delimited by exactly ONE kind of separator. A frame with both
+        // (a multi-declarator `let a = 1, b = 2;` or a sequence expression) is not
+        // a group — its comma isn't a member boundary.
+        if self.has_comma && self.has_semicolon {
+            return false;
+        }
+        if self.has_comma {
+            return true; // comma group (call args, array, object literal)
+        }
+        // Semicolon group — only for type/interface member lists, never for
+        // statement blocks (where `;` terminates statements, not members).
+        self.has_semicolon && !self.stmt_block
     }
 
     fn is_comma_group(&self) -> bool {
@@ -62,9 +76,33 @@ impl Frame {
     fn first_delim_k(&self) -> Option<usize> {
         self.first_comma_k.or(self.first_semicolon_k)
     }
+}
 
-    fn last_delim_k(&self) -> Option<usize> {
-        self.last_comma_k.or(self.last_semicolon_k)
+/// Whether the `{` at sig index `k` opens a statement block (vs. a type/object
+/// literal), based on the preceding significant token. Statement blocks follow
+/// `)` (headers), `=>` (arrow bodies), a block keyword, or a bare-block position.
+fn is_stmt_block_brace(
+    k: usize,
+    kind: &dyn Fn(usize) -> TokKind,
+    text: &dyn Fn(usize) -> String,
+    bchar: &dyn Fn(usize) -> u8,
+) -> bool {
+    if bchar(k) != b'{' {
+        return false; // only `{}` frames can be statement blocks
+    }
+    if k == 0 {
+        return true; // bare block at start of input
+    }
+    let p = k - 1;
+    match kind(p) {
+        // `)` → if/for/while/switch/catch header or function body; `}` → block
+        // immediately after another block (bare block).
+        TokKind::Close => matches!(bchar(p), b')' | b'}'),
+        TokKind::Semicolon => true, // bare block after a statement
+        TokKind::Open => bchar(p) == b'{', // first thing inside another block
+        TokKind::Punct => text(p) == "=>", // arrow function body
+        TokKind::Word => matches!(text(p).as_str(), "else" | "do" | "try" | "finally"),
+        _ => false,
     }
 }
 
@@ -162,6 +200,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                         explode: false,
                         close_k: None,
                         never_group: css && bchar(k) == b'{',
+                        stmt_block: is_stmt_block_brace(k, &kind, &text, &bchar),
                     });
                     open_frame[k] = Some(id);
                     stack.push(id);
@@ -243,7 +282,6 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
         f.explode = f.force_explode || nl_after > 0 || nl_before > 0;
     }
 
-    let is_group = |fid: usize| frames[fid].is_group();
     let explodes = |fid: usize| frames[fid].explode;
 
     // ── Build the emit list ──
@@ -817,6 +855,50 @@ mod tests {
         let out = fmt(input);
         assert_eq!(out, input, "block wrongly treated as group:\n{out}");
         assert_idempotent(input);
+    }
+
+    #[test]
+    fn semicolon_type_literal_explodes_on_first_boundary() {
+        // `;`-separated type members follow the same first-boundary switch as `,`.
+        let input = "type T = { a: string;\nb: number; c: boolean; }\n";
+        assert_eq!(
+            fmt(input),
+            "type T = {\n\ta: string;\n\tb: number;\n\tc: boolean;\n}\n"
+        );
+        assert_idempotent(&fmt(input));
+    }
+
+    #[test]
+    fn semicolon_type_literal_collapses_when_inline() {
+        let input = "type T = { a: string; b: number; };\n";
+        assert_eq!(fmt(input), "type T = { a: string; b: number; };\n");
+    }
+
+    #[test]
+    fn semicolon_group_no_trailing_comma() {
+        // A semicolon group must not get a synthetic trailing comma on explode.
+        let out = fmt("interface I { a: string;\nb: number; }\n");
+        assert!(!out.contains(","), "spurious comma:\n{out}");
+    }
+
+    #[test]
+    fn exploded_member_breaks_after_trailing_comment() {
+        // A trailing comment stays on the member's line; the next member still
+        // breaks onto its own line.
+        let input = "type T = { a: string;\nb: string; /** doc */ c: string; }\n";
+        assert_eq!(
+            fmt(input),
+            "type T = {\n\ta: string;\n\tb: string; /** doc */\n\tc: string;\n}\n"
+        );
+    }
+
+    #[test]
+    fn statement_block_is_not_a_semicolon_group() {
+        // A block after `)` / `=>` must never collapse its statements onto one line.
+        let arrow = "const f = () => {\n\tdoA(); doB();\n};\n";
+        assert_eq!(fmt(arrow), arrow, "arrow body collapsed");
+        let if_body = "if (x) {\n\tif (y) a++; else b++;\n}\n";
+        assert_eq!(fmt(if_body), if_body, "if body collapsed");
     }
 
     #[test]
