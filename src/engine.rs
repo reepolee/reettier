@@ -26,6 +26,9 @@ struct Out {
     forced: bool,
     /// When `brk > 0` and not `forced`, the author's indent level for this line.
     author_level: usize,
+    /// Set on a `{` token that opens a `switch (...) { }` body, so `emit` can
+    /// give `case:`/`default:` labels the block level and their bodies one deeper.
+    opens_switch: bool,
 }
 
 struct Frame {
@@ -292,6 +295,23 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
 
     let explodes = |fid: usize| frames[fid].explode;
 
+    // A `{` opens a switch body when it directly follows `switch (…)`: prev sig is
+    // a `)` whose matching `(` is preceded by the `switch` keyword.
+    let is_switch_open = |k: usize| -> bool {
+        if bchar(k) != b'{' || k == 0 {
+            return false;
+        }
+        if !(kind(k - 1) == TokKind::Close && bchar(k - 1) == b')') {
+            return false;
+        }
+        let paren_fid = match close_frame[k - 1] {
+            Some(f) => f,
+            None => return false,
+        };
+        let paren_open = frames[paren_fid].open_k;
+        paren_open > 0 && kind(paren_open - 1) == TokKind::Word && text(paren_open - 1) == "switch"
+    };
+
     // ── Build the emit list ──
     let mut items: Vec<Out> = Vec::new();
     for k in 0..m {
@@ -340,6 +360,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                             space: false,
                             forced: false,
                             author_level: 0,
+                            opens_switch: false,
                         },
                     );
                 }
@@ -353,6 +374,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
             space,
             forced,
             author_level: gap_indent[k],
+            opens_switch: kind(k) == TokKind::Open && is_switch_open(k),
         });
     }
 
@@ -622,14 +644,16 @@ fn space_rule(
 ///
 /// A bracket that indents (its open is followed by a newline) sets its content
 /// level to `its own line's level + 1`. Forced lines (group explode, closing
-/// brackets) take that structural level exactly; author-preserved lines take
-/// `max(structural, author_level)` so extra indentation the author added for
-/// `case:` bodies, method chains, and labels survives.
+/// brackets) take that structural level exactly. Inside a `switch` body, `case:`/
+/// `default:` labels take the block level and their statements one deeper.
+/// Remaining author-preserved lines take `max(structural, author_level)` so
+/// extra indentation the author added for method chains and labels survives.
 #[allow(unused_assignments)] // at_line_start is written on the last iteration
 fn emit(items: &[Out], indent: &str) -> String {
     struct Bracket {
         indents: bool,
         open_line_level: usize,
+        switch_body: bool,
     }
     let mut out = String::new();
     let mut stack: Vec<Bracket> = Vec::new();
@@ -665,14 +689,23 @@ fn emit(items: &[Out], indent: &str) -> String {
                 stack.last().map(|b| b.open_line_level).unwrap_or(0)
             } else if it.forced {
                 structural
+            } else if stack.last().is_some_and(|b| b.switch_body) {
+                // Inside a switch body: `case:`/`default:` labels sit at the block
+                // level; every other line is a case-body statement, one deeper.
+                let is_label = it.kind == TokKind::Word && (it.text == "case" || it.text == "default");
+                if is_label {
+                    structural
+                } else {
+                    structural + 1
+                }
             } else if prev_boundary {
                 // First statement of a fresh block (prev token was `{`): re-indent
                 // to structural depth, correcting author over-indent (Rule 2).
                 structural
             } else {
-                // Continuation line (method chain, `case:` body, label): the
-                // author's extra indent is intentional and has no structural
-                // signal, so keep it as a floor.
+                // Continuation line (method chain, label): the author's extra
+                // indentation is intentional and has no structural signal, so keep
+                // it as a floor.
                 structural.max(it.author_level)
             };
             cur_line_level = level;
@@ -692,6 +725,7 @@ fn emit(items: &[Out], indent: &str) -> String {
                 stack.push(Bracket {
                     indents: false,
                     open_line_level: cur_line_level,
+                    switch_body: it.opens_switch,
                 });
                 pending_open = Some(stack.len() - 1);
             }
@@ -896,6 +930,24 @@ mod tests {
         // `;`, but must keep the case body's author indent, not drop to structural.
         let input = "switch (fmt) {\n\tcase \"a\":\n\tcase \"b\":\n\t\tx = 1;\n\t\tbreak;\n\tdefault:\n\t\treturn null;\n}\n";
         assert_eq!(fmt(input), input, "case body statement de-indented");
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn switch_flat_input_gets_case_body_indent() {
+        // Flat (zero-indent) input: case bodies must be indented one level deeper
+        // than their labels, structurally — no author indent to lean on.
+        let input = "switch (f) {\ncase \"a\":\ncase \"b\":\nx = 1;\nbreak;\ndefault:\nreturn null;\n}\n";
+        let expected = "switch (f) {\n\tcase \"a\":\n\tcase \"b\":\n\t\tx = 1;\n\t\tbreak;\n\tdefault:\n\t\treturn null;\n}\n";
+        assert_eq!(fmt(input), expected);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn switch_case_body_with_nested_block() {
+        let input = "switch (x) {\ncase 1:\nif (y) {\nz();\n}\nbreak;\ndefault:\nreturn;\n}\n";
+        let expected = "switch (x) {\n\tcase 1:\n\t\tif (y) {\n\t\t\tz();\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\treturn;\n}\n";
+        assert_eq!(fmt(input), expected);
         assert_idempotent(input);
     }
 
