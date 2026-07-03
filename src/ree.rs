@@ -177,8 +177,8 @@ fn code_block(
 }
 
 /// Whether the code contains a bare Ree directive — a `{` immediately followed
-/// by one of `# / : = ~` outside any string/template/comment. Such a block is
-/// left verbatim rather than formatted as JS/CSS.
+/// by one of `# / : = ~ - _` outside any string/template/comment. Such a block
+/// is left verbatim rather than formatted as JS/CSS.
 fn has_ree_directive(content: &str, css: bool) -> bool {
     let toks = if css {
         crate::tokenizer::tokenize_css(content)
@@ -193,7 +193,7 @@ fn has_ree_directive(content: &str, css: bool) -> bool {
         let is_brace = w[0].kind == TokKind::Open && content.as_bytes()[w[0].start] == b'{';
         if is_brace {
             let first = content.as_bytes()[w[1].start];
-            if matches!(first, b'#' | b'/' | b':' | b'=' | b'~') {
+            if matches!(first, b'#' | b'/' | b':' | b'=' | b'~' | b'-' | b'_') {
                 return true;
             }
         }
@@ -910,6 +910,18 @@ mod tests {
     }
 
     #[test]
+    fn unescaped_html_directive_untouched() {
+        let input = "<div>{- raw_html}</div>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn trimmed_text_directive_untouched() {
+        let input = "<div>{_ label}</div>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
     fn multi_line_tag_attributes_indent() {
         let input = "<div>\n<a\nhref=\"/x\"\nclass=\"btn\"\n>\nlink\n</a>\n</div>\n";
         let out = fmt(input);
@@ -940,6 +952,13 @@ mod tests {
     fn ree_directives_in_script_are_verbatim() {
         // {#each}/{~ } inside a script must not be mangled into { #each }/{ ~ }.
         let input = "<script>\n{#each xs as x}\ndo({~ x});\n{/each}\n</script>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn unescaped_and_trimmed_directives_in_script_are_verbatim() {
+        // {- }/{_ } inside a script must not be mangled by JS formatting.
+        let input = "<script>\n{#each xs as x}\ndo({- x});\ndo({_ x});\n{/each}\n</script>\n";
         assert_eq!(fmt(input), input);
     }
 
