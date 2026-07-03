@@ -739,12 +739,16 @@ fn emit(items: &[Out], indent: &str) -> String {
             _ => {}
         }
 
-        // Track the block-open state for the *next* line's indent choice. Only a
-        // `{` marks a fresh block; comments are neutral (they keep the last code
-        // token's state, so `{ // note` still opens a block for the next line).
+        // Track the block-open / statement-end state for the *next* line's
+        // indent choice. A `{` marks a fresh block so its first statement
+        // gets structural depth; a `;` marks a statement boundary so every
+        // sibling statement is also realigned to structural depth. Comments
+        // are neutral (they keep the last code token's state, so `{ // note`
+        // still opens a block for the next line).
         prev_boundary = match it.kind {
             TokKind::LineComment | TokKind::BlockComment => prev_boundary,
             TokKind::Open => it.text == "{",
+            TokKind::Semicolon => true,
             _ => false,
         };
     }
