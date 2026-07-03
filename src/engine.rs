@@ -29,6 +29,10 @@ struct Out {
     /// Set on a `{` token that opens a `switch (...) { }` body, so `emit` can
     /// give `case:`/`default:` labels the block level and their bodies one deeper.
     opens_switch: bool,
+    /// Set on a `}` token that closes a statement block (if/for/while/function/…)
+    /// as opposed to an object literal or type body. When true, the next line
+    /// gets structural indentation rather than preserving author over-indent.
+    closes_stmt_block: bool,
 }
 
 struct Frame {
@@ -361,11 +365,16 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
                             forced: false,
                             author_level: 0,
                             opens_switch: false,
+                            closes_stmt_block: false,
                         },
                     );
                 }
             }
         }
+
+        let is_close_brace = kind(k) == TokKind::Close && bchar(k) == b'}';
+        let closes_stmt_block = is_close_brace
+            && close_frame[k].map_or(false, |fid| frames[fid].stmt_block);
 
         items.push(Out {
             text: text(k),
@@ -375,6 +384,7 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
             forced,
             author_level: gap_indent[k],
             opens_switch: kind(k) == TokKind::Open && is_switch_open(k),
+            closes_stmt_block,
         });
     }
 
@@ -742,13 +752,15 @@ fn emit(items: &[Out], indent: &str) -> String {
         // Track the block-open / statement-end state for the *next* line's
         // indent choice. A `{` marks a fresh block so its first statement
         // gets structural depth; a `;` marks a statement boundary so every
-        // sibling statement is also realigned to structural depth. Comments
-        // are neutral (they keep the last code token's state, so `{ // note`
-        // still opens a block for the next line).
+        // sibling is realigned; a `}` that closes a statement block does
+        // the same for the code that follows it. Object-literal `}` does
+        // NOT set the flag so method chains (`.foo()` after `}`) keep
+        // their author indent. Comments are neutral.
         prev_boundary = match it.kind {
             TokKind::LineComment | TokKind::BlockComment => prev_boundary,
             TokKind::Open => it.text == "{",
             TokKind::Semicolon => true,
+            TokKind::Close => it.text == "}" && it.closes_stmt_block,
             _ => false,
         };
     }
