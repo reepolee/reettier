@@ -15,8 +15,10 @@ punctuation spacing, and group shape. You steer the layout — reettier keeps it
 4. **Group switch** — a group explodes one-per-line when you break after its first
    element, and collapses otherwise. A group is a **comma** sequence in `(…)`/`[…]`/`{…}`,
    a **semicolon** member list in a type/interface literal (`{ a: string; b: number }`),
-   or an HTML attribute list. The trailing comma is managed for you. Statement blocks
-   and multi-declarators (`let a = 1, b = 2`) are never groups.
+   or an HTML attribute list. Trailing commas are managed by shape: arrays `[…]` and
+   objects `{…}` get them when exploded; function calls `(…)`, type/interface members,
+   and CSS never do. Statement blocks and multi-declarators (`let a = 1, b = 2`) are
+   never groups.
 
 It's a pure Rust binary with zero runtime dependencies — no Node.js required. It
 self-verifies: if a format wouldn't preserve the meaning-bearing tokens, the file
