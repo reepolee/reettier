@@ -345,8 +345,10 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
         // never lands inside a `//` comment, and not if one is already there.
         // Semicolon groups don't get trailing semicolons (they're already terminators).
         // CSS forbids trailing commas (e.g. in rgba()/selector lists), so skip.
+        // Function calls `()` forbid trailing commas in JS, so skip those too.
         if let Some(fid) = close_frame[k] {
-            if !css && frames[fid].is_comma_group() && explodes(fid) && !last_elem_is_rest(&frames[fid], m, &kind, &text) {
+            let is_paren_group = !frames[fid].brace && bchar(frames[fid].open_k) == b'(';
+            if !css && frames[fid].is_comma_group() && explodes(fid) && !is_paren_group && !last_elem_is_rest(&frames[fid], m, &kind, &text) {
                 let mut ins = items.len();
                 while ins > 0
                     && matches!(items[ins - 1].kind, TokKind::LineComment | TokKind::BlockComment)
