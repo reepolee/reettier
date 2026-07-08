@@ -19,6 +19,10 @@ pub(crate) enum Node {
         /// The printer preserves this: inline elements stay on one line,
         /// block elements get their children indented.
         inline: bool,
+        /// True when the source had a bare opening tag with no matching close
+        /// and no children (e.g. `<nav data-x{~ expr }>` on its own). The
+        /// printer emits just the opening tag, never a synthesized `</tag>`.
+        unclosed: bool,
     },
     ReeBlock {
         keyword: String,
@@ -371,7 +375,7 @@ fn parse_html_tag<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<N
 
     if let Some(after) = remaining.strip_prefix("/>") {
         return (
-            Some(Node::Element { tag, attrs, children: vec![], self_closing: true, inline: true }),
+            Some(Node::Element { tag, attrs, children: vec![], self_closing: true, inline: true, unclosed: false }),
             after,
         );
     }
@@ -381,7 +385,7 @@ fn parse_html_tag<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<N
         // Void elements (input, br, hr, etc.) don't have children — treat as self-closing
         if is_void_element(&tag) {
             return (
-                Some(Node::Element { tag, attrs, children: vec![], self_closing: true, inline: true }),
+                Some(Node::Element { tag, attrs, children: vec![], self_closing: true, inline: true, unclosed: false }),
                 after_gt,
             );
         }
@@ -392,13 +396,13 @@ fn parse_html_tag<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<N
             if rem.starts_with(&close) {
                 if let Some(gt) = rem.find('>') {
                     return (
-                        Some(Node::Element { tag, attrs, children, self_closing: false, inline: false }),
+                        Some(Node::Element { tag, attrs, children, self_closing: false, inline: false, unclosed: false }),
                         &rem[gt + 1..],
                     );
                 }
             }
             return (
-                Some(Node::Element { tag, attrs, children, self_closing: false, inline: false }),
+                Some(Node::Element { tag, attrs, children, self_closing: false, inline: false, unclosed: false }),
                 rem,
             );
         }
@@ -416,18 +420,23 @@ fn parse_html_tag<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<N
         if rem.starts_with("</") {
             if let Some(gt) = rem.find('>') {
                 return (
-                    Some(Node::Element { tag, attrs, children, self_closing: false, inline }),
+                    Some(Node::Element { tag, attrs, children, self_closing: false, inline, unclosed: false }),
                     &rem[gt + 1..],
                 );
             }
         }
+        // No matching close tag was found. If nothing was consumed as children,
+        // the source was a bare opening tag - preserve it verbatim (unclosed)
+        // rather than synthesizing a `</tag>`. If children were consumed, keep
+        // the historical behavior (explicit close in the printer).
+        let unclosed = children.is_empty();
         return (
-            Some(Node::Element { tag, attrs, children, self_closing: false, inline }),
+            Some(Node::Element { tag, attrs, children, self_closing: false, inline, unclosed }),
             rem,
         );
     }
 
-    (Some(Node::Element { tag, attrs, children: vec![], self_closing: false, inline: false }), remaining)
+    (Some(Node::Element { tag, attrs, children: vec![], self_closing: false, inline: false, unclosed: true }), remaining)
 }
 
 fn parse_attrs(input: &str) -> (Vec<String>, &str) {
@@ -779,13 +788,20 @@ fn print_node(node: &Node, depth: usize, out: &mut String, wrap_width: usize, on
                 out.push('\n');
             }
         }
-        Node::Element { tag, attrs, children, self_closing, inline } => {
-            if *self_closing {
+        Node::Element { tag, attrs, children, self_closing, inline, unclosed } => {
+            if *unclosed {
+                // Bare opening tag with no matching close in source - emit it
+                // verbatim, no synthesized `</tag>`.
+                let attr_str = format_attrs_inline(attrs);
+                out.push_str(&"\t".repeat(depth));
+                out.push_str(&format!("{}>", open_tag_head(tag, &attr_str)));
+                out.push('\n');
+            } else if *self_closing {
                 print_self_closing(tag, attrs, depth, out);
             } else if tag.eq_ignore_ascii_case("pre") {
                 // Preserve <pre> content verbatim — whitespace is significant.
                 let attr_str = format_attrs_inline(attrs);
-                let open = if attr_str.is_empty() { format!("<{}>", tag) } else { format!("<{} {}>", tag, attr_str) };
+                let open = format!("{}>", open_tag_head(tag, &attr_str));
                 out.push_str(&"\t".repeat(depth));
                 out.push_str(&open);
                 for child in children {
@@ -921,17 +937,9 @@ fn render_node_inline(node: &Node) -> String {
         Node::Element { tag, attrs, children, self_closing, .. } => {
             let attr_str = format_attrs_inline(attrs);
             if *self_closing {
-                if attr_str.is_empty() {
-                    format!("<{} />", tag)
-                } else {
-                    format!("<{} {} />", tag, attr_str)
-                }
+                format!("{} />", open_tag_head(tag, &attr_str))
             } else {
-                let tag_open = if attr_str.is_empty() {
-                    format!("<{}>", tag)
-                } else {
-                    format!("<{} {}>", tag, attr_str)
-                };
+                let tag_open = format!("{}>", open_tag_head(tag, &attr_str));
                 let content: String = children.iter().map(render_node_inline).collect();
                 format!("{}{}</{}>", tag_open, content.trim(), tag)
             }
@@ -957,11 +965,7 @@ fn render_node_inline(node: &Node) -> String {
 
 fn print_block_element(tag: &str, attrs: &[String], children: &[Node], depth: usize, out: &mut String, wrap_width: usize, oneline: usize) {
     let attr_str = format_attrs_inline(attrs);
-    let tag_line = if attr_str.is_empty() {
-        format!("<{}>", tag)
-    } else {
-        format!("<{} {}>", tag, attr_str)
-    };
+    let tag_line = format!("{}>", open_tag_head(tag, &attr_str));
 
     if tag_line.len() <= wrap_width {
         out.push_str(&"\t".repeat(depth));
@@ -1010,6 +1014,20 @@ fn format_attrs_inline(attrs: &[String]) -> String {
     attrs.join(" ")
 }
 
+/// Build the opening portion of a tag (`<tag` plus its inline attrs), without
+/// the closing `>` or ` />`. A brace expression that abuts the tag name in
+/// source, e.g. `<details{~ open ? ' open' : '' }>`, is glued back with no
+/// separating space; a normal attribute is space-separated as usual.
+fn open_tag_head(tag: &str, attr_str: &str) -> String {
+    if attr_str.is_empty() {
+        format!("<{}", tag)
+    } else if attr_str.starts_with('{') {
+        format!("<{}{}", tag, attr_str)
+    } else {
+        format!("<{} {}", tag, attr_str)
+    }
+}
+
 /// HTML void elements that cannot have children.
 /// Per HTML spec: area, base, br, col, embed, hr, img, input, link, meta,
 /// param, source, track, wbr.
@@ -1025,11 +1043,7 @@ fn print_empty_element(tag: &str, attrs: &[String], depth: usize, out: &mut Stri
 
     // Void HTML elements (input, br, hr, etc.) use self-closing syntax <tag />
     if is_void_element(tag) {
-        let self_close = if attr_str.is_empty() {
-            format!("<{}/>", tag)
-        } else {
-            format!("<{} {}/>", tag, attr_str)
-        };
+        let self_close = format!("{}/>", open_tag_head(tag, &attr_str));
         out.push_str(&"\t".repeat(depth));
         out.push_str(&self_close);
         out.push('\n');
@@ -1038,11 +1052,7 @@ fn print_empty_element(tag: &str, attrs: &[String], depth: usize, out: &mut Stri
 
     // Non-void empty elements: use explicit close tag <tag></tag>
     if !is_script_or_style(tag) {
-        let close_tag = if attr_str.is_empty() {
-            format!("<{}></{}>", tag, tag)
-        } else {
-            format!("<{} {}></{}>", tag, attr_str, tag)
-        };
+        let close_tag = format!("{}></{}>", open_tag_head(tag, &attr_str), tag);
         if close_tag.len() + depth <= wrap_width {
             out.push_str(&"\t".repeat(depth));
             out.push_str(&close_tag);
@@ -1051,11 +1061,7 @@ fn print_empty_element(tag: &str, attrs: &[String], depth: usize, out: &mut Stri
         }
     }
     // Fall back to <tag></tag> for long lines or script/style tags
-    let open = if attr_str.is_empty() {
-        format!("<{}>", tag)
-    } else {
-        format!("<{} {}>", tag, attr_str)
-    };
+    let open = format!("{}>", open_tag_head(tag, &attr_str));
     let close = format!("</{}>", tag);
     out.push_str(&"\t".repeat(depth));
     out.push_str(&open);

@@ -345,7 +345,8 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
         // never lands inside a `//` comment, and not if one is already there.
         // Semicolon groups don't get trailing semicolons (they're already terminators).
         // CSS forbids trailing commas (e.g. in rgba()/selector lists), so skip.
-        // Function calls `()` forbid trailing commas in JS, so skip those too.
+        // Function-call parens `()` don't get one (rule 4: only arrays [] and
+        // objects {} do), so skip paren groups too.
         if let Some(fid) = close_frame[k] {
             let is_paren_group = !frames[fid].brace && bchar(frames[fid].open_k) == b'(';
             if !css && frames[fid].is_comma_group() && explodes(fid) && !is_paren_group && !last_elem_is_rest(&frames[fid], m, &kind, &text) {
@@ -800,8 +801,9 @@ mod tests {
 
     #[test]
     fn explode_when_first_boundary_broken() {
+        // Function-call parens don't get a trailing comma (rule 4).
         let input = "foo(a,\n b)\n";
-        assert_eq!(fmt(input), "foo(\n\ta,\n\tb,\n)\n");
+        assert_eq!(fmt(input), "foo(\n\ta,\n\tb\n)\n");
         assert_idempotent(input);
     }
 
@@ -816,9 +818,10 @@ mod tests {
     #[test]
     fn nested_hug() {
         // Collapsed outer wrapping an exploded inner → closers hug.
+        // Call parens get no trailing comma (rule 4).
         let input = "foo(a, bar(\n\tb,\n\tc\n))\n";
         let out = fmt(input);
-        assert_eq!(out, "foo(a, bar(\n\tb,\n\tc,\n))\n");
+        assert_eq!(out, "foo(a, bar(\n\tb,\n\tc\n))\n");
         assert_idempotent(input);
     }
 
@@ -1117,7 +1120,8 @@ mod tests {
     fn synthetic_comma_goes_before_trailing_comment() {
         // Regression: exploded group whose last element has a trailing comment —
         // the managed comma must land after the code, not inside the comment.
-        let input = "foo(\n\ta,\n\tb // last\n)\n";
+        // Uses an array literal, since call parens get no trailing comma (rule 4).
+        let input = "x = [\n\ta,\n\tb // last\n]\n";
         let out = fmt(input);
         assert!(out.contains("b, // last"), "comma misplaced:\n{out}");
         assert!(!out.contains("// last,"), "comma entered comment:\n{out}");

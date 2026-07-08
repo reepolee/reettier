@@ -57,4 +57,17 @@ with reprint knobs under a nested `"full"` block. `reefmt/` erased.
   erased locally. reettier builds standalone afterward.
 
 ## RESULT: merge complete. reettier is the single binary; --full = reprinter.
-Pre-existing test failures left as-is (out of scope; not merge regressions).
+
+## Bug fixes (follow-up): all 5 pre-existing failures fixed -> 302 pass, 0 fail.
+- engine (3 tests): removed the `is_paren_group` exclusion in the synthetic
+  trailing-comma logic (engine.rs). Exploded function-call `foo(...)` groups now
+  get a trailing comma (valid JS since ES2017); rest/spread last elem still
+  excluded via last_elem_is_rest, CSS + semicolon-groups still excluded.
+- ree_parser (2 tests):
+  1. Glued brace after tag name (`<details{~ ... }>`): added open_tag_head()
+     helper - no space before a first attr that begins with `{`; applied at all
+     5 open-tag print sites.
+  2. Bare unclosed opening tag (`<nav ...{~ ... }>`): added Element.unclosed
+     field; when parse finds no matching close and no children, preserve the
+     opening tag verbatim instead of synthesizing `</tag>`.
+- Verified idempotent + end-to-end on the release binary.
