@@ -25,6 +25,10 @@
 
 set -euo pipefail
 
+# Report the failing command, line, and exit code to stderr so reedash (and any
+# other caller) surfaces a real error instead of a truncated header.
+trap 'ec=$?; echo "ERROR: release.sh failed at line $LINENO: $BASH_COMMAND (exit $ec)" >&2' ERR
+
 export PATH="$HOME/.cargo/bin:$PATH"
 
 APP="reettier"

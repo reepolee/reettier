@@ -80,22 +80,32 @@ root to customize file discovery and the indent string:
 
 ## Development
 
-This is a Rust project.
+This is a Rust project. To test locally without releasing:
 
 ```bash
-cargo test
 cargo build --release
+cp target/release/reettier ~/.local/bin/   # macOS/Linux
 ```
 
-To build and publish a release (bumps version, tags, uploads binaries, installs
-locally):
+### Release workflow
+
+Releases are cut from a single machine (the Mac mini). `release.sh` cross-builds
+**all six targets** and publishes them as one GitHub Release:
+
+- macOS arm64/x64 (native `cargo build`)
+- Linux x64/arm64 (`cargo zigbuild`)
+- Windows x64/arm64 (`cargo xwin build`)
 
 ```bash
-bash release.sh          # macOS / Linux
-.\release.ps1            # Windows
+bash release.sh            # bump, tag, cross-build all targets, publish
+bash release.sh --minor    # bump the minor version instead of patch
+bash release.sh --draft    # publish the release as a draft
 ```
 
-On any branch other than `main`, `release.sh`/`release.ps1` instead builds a local
-dev binary named `reettier-<branch>` (no publish), so you can test a branch build
-side-by-side with the released `reettier`. Pass `--release-branch` / `-ReleaseBranch`
-to force a real publish from a branch.
+One-time setup on the Mac:
+
+```bash
+brew install zig
+cargo install cargo-zigbuild cargo-xwin
+rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+```
