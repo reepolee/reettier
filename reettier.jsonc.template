@@ -1,0 +1,32 @@
+{
+	// File discovery (shared by the default indenter and --full). Every key is
+	// optional; a missing reettier.jsonc means these defaults apply.
+	"skipDirs": ["node_modules", "vendor", "vendors", "dist", "static", "templates"],
+	"skipFiles": [],
+	"skipExtensions": ["min.js", "min.css"],
+	"extensions": ["ree", "ts", "js", "css"],
+	"skipDotDirs": true,
+
+	// The only indenter knob: the indent string. "\t" (default) or e.g. "  ".
+	"indent": "\t",
+
+	// Reprinter knobs. These apply ONLY when you run `reettier --full`; the
+	// default indenter never reads them. Defaults shown; delete any you don't
+	// override.
+	"full": {
+		"wrapWidth": 100,
+		"collapseSingleStatementBlocks": true,
+		"collapseMaxMembers": 4,
+		// "collapseMaxObjectMembers": 4,
+		// "collapseMaxArrayElements": 4,
+		// "collapseMaxFunctionParams": 4,
+		// "collapseMaxCallArgs": 4,
+		// "collapseMaxImports": 4,
+		// "collapseMaxTypeMembers": 4,
+		"collapseSoftWidth": 100,
+		"tabWidth": 4,
+		"collapseMaxKeyValueProps": 1,
+		"hugCallArgs": false,
+		"oneline": 0
+	}
+}

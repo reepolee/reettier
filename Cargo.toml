@@ -15,6 +15,18 @@ serde = { version = "1", features = ["derive"] }
 json5 = "0.4"
 rayon = "1"
 
+# --full (Reprinter) engine: SWC for native JS/TS reprint (no subprocess),
+# malva for CSS. Vendored from reefmt; see docs/adr/0001.
+swc_core = { version = "69", features = [
+	"ecma_parser",
+	"ecma_codegen",
+	"ecma_ast",
+	"common",
+	"ecma_visit",
+	"swc_atoms",
+] }
+malva = "0.16.0"
+
 [profile.release]
 opt-level = 3
 lto = true

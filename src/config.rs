@@ -48,9 +48,12 @@ pub struct Config {
     #[serde(rename = "skipDotDirs")]
     pub skip_dot_dirs: bool,
     /// The indent string. `"\t"` (default) for a hard tab, or e.g. `"  "` for
-    /// two spaces. This is the only formatting knob — the whole point of the
-    /// rewrite is that the author steers line breaks, not config.
+    /// two spaces. This is the only Indenter formatting knob — the whole point
+    /// of the rewrite is that the author steers line breaks, not config.
     pub indent: String,
+    /// Reprinter (`--full`) knobs. These only apply when formatting with
+    /// `--full`; the default Indenter never reads them. See docs/adr/0001.
+    pub full: FullConfig,
 }
 
 impl Default for Config {
@@ -62,6 +65,113 @@ impl Default for Config {
             extensions: default_extensions(),
             skip_dot_dirs: default_true(),
             indent: default_indent(),
+            full: FullConfig::default(),
+        }
+    }
+}
+
+fn default_wrap_width() -> usize {
+    100
+}
+fn default_collapse_max_members() -> usize {
+    4
+}
+fn default_soft_width() -> usize {
+    100
+}
+fn default_tab_width() -> usize {
+    4
+}
+fn default_keyvalue_props() -> usize {
+    1
+}
+
+/// Reprinter-only configuration (the `"full"` block of `reettier.jsonc`).
+/// Ported from reefmt's flat config; `removeUnusedImports` is intentionally
+/// absent (no formatting mode edits semantics - see docs/adr/0001).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct FullConfig {
+    /// Maximum line width before elements are broken onto multiple lines.
+    #[serde(rename = "wrapWidth")]
+    pub wrap_width: usize,
+    /// When true, single-statement blocks and object-literal function params are
+    /// collapsed onto one line when they fit within wrapWidth.
+    #[serde(rename = "collapseSingleStatementBlocks")]
+    pub collapse_single_stmt_blocks: bool,
+    /// Global fallback member limit; any per-category limit left unset uses it.
+    #[serde(rename = "collapseMaxMembers")]
+    pub collapse_max_members: usize,
+    #[serde(rename = "collapseMaxObjectMembers")]
+    pub collapse_max_object_members: Option<usize>,
+    #[serde(rename = "collapseMaxArrayElements")]
+    pub collapse_max_array_elements: Option<usize>,
+    #[serde(rename = "collapseMaxFunctionParams")]
+    pub collapse_max_function_params: Option<usize>,
+    #[serde(rename = "collapseMaxCallArgs")]
+    pub collapse_max_call_args: Option<usize>,
+    #[serde(rename = "collapseMaxImports")]
+    pub collapse_max_imports: Option<usize>,
+    #[serde(rename = "collapseMaxTypeMembers")]
+    pub collapse_max_type_members: Option<usize>,
+    /// Soft wrap width: any collapsible structure whose inline form fits within
+    /// this width stays on one line regardless of the count caps. 0 disables.
+    #[serde(rename = "collapseSoftWidth")]
+    pub collapse_soft_width: usize,
+    /// Display width of a tab, used to measure line widths for wrap/collapse.
+    #[serde(rename = "tabWidth")]
+    pub tab_width: usize,
+    /// Max `key: value` props an object literal may have and still collapse.
+    #[serde(rename = "collapseMaxKeyValueProps")]
+    pub collapse_max_keyvalue_props: usize,
+    /// Argument-hugging: `({ ... })` on the callee line for a single object/array
+    /// argument that does not fit inline.
+    #[serde(rename = "hugCallArgs")]
+    pub hug_call_args: bool,
+    /// Width threshold for collapsing multi-line HTML leaf elements onto one
+    /// line in `.ree` files. 0 disables.
+    pub oneline: usize,
+}
+
+impl Default for FullConfig {
+    fn default() -> Self {
+        FullConfig {
+            wrap_width: default_wrap_width(),
+            collapse_single_stmt_blocks: default_true(),
+            collapse_max_members: default_collapse_max_members(),
+            collapse_max_object_members: None,
+            collapse_max_array_elements: None,
+            collapse_max_function_params: None,
+            collapse_max_call_args: None,
+            collapse_max_imports: None,
+            collapse_max_type_members: None,
+            collapse_soft_width: default_soft_width(),
+            tab_width: default_tab_width(),
+            collapse_max_keyvalue_props: default_keyvalue_props(),
+            hug_call_args: false,
+            oneline: 0,
+        }
+    }
+}
+
+impl FullConfig {
+    /// Build the Reprinter's `CollapseConfig`, applying per-category fallback to
+    /// `collapse_max_members`.
+    pub(crate) fn collapse_config(&self) -> crate::full::format::CollapseConfig {
+        let def = self.collapse_max_members;
+        crate::full::format::CollapseConfig {
+            enabled: self.collapse_single_stmt_blocks,
+            max_object_members: self.collapse_max_object_members.unwrap_or(def),
+            max_array_elements: self.collapse_max_array_elements.unwrap_or(def),
+            max_function_params: self.collapse_max_function_params.unwrap_or(def),
+            max_call_args: self.collapse_max_call_args.unwrap_or(def),
+            max_imports: self.collapse_max_imports.unwrap_or(def),
+            max_type_members: self.collapse_max_type_members.unwrap_or(def),
+            soft_wrap_width: self.collapse_soft_width,
+            tab_width: self.tab_width,
+            max_keyvalue_props: self.collapse_max_keyvalue_props,
+            collapse_width: self.oneline,
+            hug_call_args: self.hug_call_args,
         }
     }
 }

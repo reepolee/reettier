@@ -1,11 +1,14 @@
-//! reettier — a layout-preserving formatter for `.ree` templates and their
-//! embedded JS/TS/CSS. Clean-room rewrite of reefmt; see the reefmt repo's
-//! CONTEXT.md and docs/adr/0001 for the design.
+//! reettier — a formatter for `.ree` templates and their embedded JS/TS/CSS.
+//! Default mode is the layout-preserving Indenter (the author steers line
+//! breaks). `--full` selects the Reprinter, which re-derives layout from the
+//! syntax tree (the former `reefmt` engine, now vendored under `full/`).
+//! See CONTEXT.md and docs/adr/0001, 0002 for the design.
 
 mod config;
 mod discovery;
 mod engine;
 mod format;
+mod full;
 mod ree;
 mod tokenizer;
 
@@ -79,6 +82,12 @@ fn main() {
         return;
     }
 
+    if take(&mut args, &["--init"]) {
+        run_init();
+        return;
+    }
+
+    let full_mode = take(&mut args, &["--full"]);
     let diff_mode = take(&mut args, &["--diff"]);
     let check_mode = take(&mut args, &["--check", "--dry-run", "-c"]);
     let verbose = take(&mut args, &["--verbose"]);
@@ -110,7 +119,7 @@ fn main() {
     });
 
     if let Some(ext) = stdin_ext {
-        run_stdin(&ext, &config);
+        run_stdin(&ext, &config, full_mode);
         return;
     }
 
@@ -138,7 +147,7 @@ fn main() {
     let start = std::time::Instant::now();
 
     files.par_iter().for_each(|file| {
-        match format_one(file, mode, &config) {
+        match format_one(file, mode, &config, full_mode) {
             Ok(true) => {
                 changed.fetch_add(1, Ordering::Relaxed);
             }
@@ -166,10 +175,10 @@ fn main() {
 }
 
 /// Format one file according to `mode`. Returns whether it changed (or would).
-fn format_one(path: &Path, mode: Mode, config: &Config) -> Result<bool, String> {
+fn format_one(path: &Path, mode: Mode, config: &Config, full: bool) -> Result<bool, String> {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let formatted = format::format_source(&original, ext, config);
+    let formatted = format::format_source_with(&original, ext, config, full);
 
     if formatted == original {
         return Ok(false);
@@ -190,7 +199,7 @@ fn format_one(path: &Path, mode: Mode, config: &Config) -> Result<bool, String> 
     Ok(true)
 }
 
-fn run_stdin(ext: &str, config: &Config) {
+fn run_stdin(ext: &str, config: &Config, full: bool) {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("Error reading stdin: {}", e);
@@ -201,7 +210,7 @@ fn run_stdin(ext: &str, config: &Config) {
         print!("{}", input);
         return;
     }
-    print!("{}", format::format_source(&input, ext, config));
+    print!("{}", format::format_source_with(&input, ext, config, full));
 }
 
 fn collect_targets(targets: &[String], config: &Config) -> Vec<PathBuf> {
@@ -288,13 +297,40 @@ fn print_help() {
     println!("  reettier [OPTIONS] [PATH...]");
     println!();
     println!("OPTIONS:");
+    println!("  --full                   Reprint: re-derive layout from the syntax tree");
+    println!("                           (default is the layout-preserving indenter)");
     println!("  --check, -c, --dry-run   List files that would change (exit 1 if any)");
     println!("  --diff                   Show a unified diff without writing");
     println!("  --git                    Format only uncommitted (git-changed) files");
     println!("  --verbose                Also print already-formatted files");
     println!("  --stdin [.ext]           Read stdin, write stdout (ext defaults to .ree)");
+    println!("  --init                   Create a starter reettier.jsonc in this directory");
     println!("  --version, -v            Print version");
     println!("  --help, -h               Print this help");
     println!();
     println!("CONFIG: reettier.jsonc in the current directory (optional).");
+    println!("        --full knobs live under the \"full\" block; see --init output.");
+}
+
+/// Scaffold a starter `reettier.jsonc` in the current directory. Config is
+/// optional, so this only helps discovery of the available keys - it never
+/// overwrites an existing file.
+fn run_init() {
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("Error: cannot determine current directory: {}", e);
+        std::process::exit(1);
+    });
+    let path = cwd.join("reettier.jsonc");
+    if path.exists() {
+        eprintln!("{} already exists - not overwriting.", path.display());
+        std::process::exit(1);
+    }
+    let template = include_str!("../reettier.jsonc.template");
+    match std::fs::write(&path, template) {
+        Ok(_) => println!("Created: {}", path.display()),
+        Err(e) => {
+            eprintln!("Error writing {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    }
 }

@@ -54,13 +54,33 @@ cat file.ts  | reettier --stdin .ts
 
 | Flag | Description |
 |---|---|
+| `--full` | Reprint: re-derive layout from the syntax tree (see below). Default is the layout-preserving indenter. |
 | `--check`, `-c`, `--dry-run` | List files that would change; exit 1 if any (for CI). |
 | `--diff` | Show a unified diff without writing. |
 | `--git` | Format only uncommitted (git-changed) files. |
 | `--verbose` | Also print already-formatted files. |
 | `--stdin [.ext]` | Read stdin, write stdout (extension defaults to `.ree`). |
+| `--init` | Create a starter `reettier.jsonc` in the current directory. |
 | `--version`, `-v` | Print the version. |
 | `--help`, `-h` | Print usage. |
+
+### Two modes: indenter (default) and reprinter (`--full`)
+
+By default reettier is the **indenter** described above: it preserves your line
+breaks. `--full` switches to the **reprinter** (the former `reefmt` engine, now
+built in), which discards your line breaks and re-derives layout from the syntax
+tree, wrapping and collapsing to width/count limits. Reach for `--full` when you
+want a full re-layout to house style rather than tidying of your own layout.
+
+`--full` works everywhere the default does, including `--stdin`:
+
+```bash
+reettier --full "src/**/*.ts"          # reprint a glob
+cat file.ts | reettier --full --stdin .ts
+```
+
+Both modes self-verify: if a format would change a meaning-bearing token or drop
+a comment, the file is left unchanged. See `docs/adr/` for the design.
 
 ## Configuration
 
@@ -77,6 +97,11 @@ root to customize file discovery and the indent string:
 	"indent": "\t"
 }
 ```
+
+The top-level keys drive file discovery (shared by both modes) and the indenter.
+Reprinter (`--full`) knobs — `wrapWidth`, the `collapse*` limits, `tabWidth`,
+`hugCallArgs`, `oneline` — live under a nested `"full"` block and only apply with
+`--full`. Run `reettier --init` to scaffold a file with every key documented.
 
 ## Development
 

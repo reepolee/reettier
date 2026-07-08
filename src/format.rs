@@ -6,7 +6,17 @@
 
 use crate::config::Config;
 
+/// Format with the default Indenter. Thin wrapper over `format_source_with`;
+/// kept as the stable entry point used by tests and any embedder.
+#[allow(dead_code)]
 pub fn format_source(content: &str, ext: &str, config: &Config) -> String {
+    format_source_with(content, ext, config, false)
+}
+
+/// Format `content`. When `full` is true, use the Reprinter (`--full`): discard
+/// the author's line breaks and re-derive layout from the syntax tree. When
+/// false (default), use the layout-preserving Indenter.
+pub fn format_source_with(content: &str, ext: &str, config: &Config, full: bool) -> String {
     // CRLF handling is centralized here — the single choke point every language
     // path flows through — so no inner engine (ts/js/css/ree) ever sees `\r`.
     // The markup path splits on `'\n'` and keeps a trailing `\r`, while embedded
@@ -23,14 +33,24 @@ pub fn format_source(content: &str, ext: &str, config: &Config) -> String {
         content
     };
 
-    let out = match ext {
-        "ts" | "js" => format_js(lf, config),
-        "css" => format_css(lf, config),
-        "ree" => format_ree(lf, config),
-        // Unknown extension: never touch it — return the *original* bytes
-        // verbatim (not the normalized copy), so non-formatted files are
-        // never modified, line endings included.
-        _ => return content.to_string(),
+    // Unknown extension: never touch it — return the *original* bytes verbatim
+    // (not the normalized copy), so non-formatted files are never modified,
+    // line endings included. Checked up front so both modes share it.
+    if !matches!(ext, "ts" | "js" | "css" | "ree") {
+        return content.to_string();
+    }
+
+    let out = if full {
+        // Reprinter: re-derive layout from the syntax tree. Its own CRLF
+        // handling was stripped upstream (we already normalized to LF here).
+        crate::full::format_full(lf, ext, &config.full)
+    } else {
+        match ext {
+            "ts" | "js" => format_js(lf, config),
+            "css" => format_css(lf, config),
+            "ree" => format_ree(lf, config),
+            _ => unreachable!("ext filtered above"),
+        }
     };
 
     if had_crlf {
