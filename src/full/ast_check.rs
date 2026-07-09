@@ -99,7 +99,7 @@ pub(crate) fn collect_comment_texts_ts(src: &str) -> Option<Vec<String>> {
     let (leading, trailing) = comments.borrow_all();
     for (_, cs) in leading.iter().chain(trailing.iter()) {
         for c in cs {
-            let text = c.text.trim().to_string();
+            let text = normalize_comment_text(&c.text);
             if !text.contains("__REEFMT_") {
                 texts.push(text);
             }
@@ -158,7 +158,7 @@ pub(crate) fn collect_comment_texts_text(src: &str) -> Vec<String> {
             i += 2;
             let start = i;
             while i < len && bytes[i] != b'\n' { i += 1; }
-            let text = src[start..i].trim().to_string();
+            let text = normalize_comment_text(&src[start..i]);
             if !text.contains("__REEFMT_") {
                 texts.push(text);
             }
@@ -172,7 +172,7 @@ pub(crate) fn collect_comment_texts_text(src: &str) -> Vec<String> {
                 if bytes[i] == b'*' && bytes[i + 1] == b'/' { i += 2; break; }
                 i += 1;
             }
-            let text = src[start..i.saturating_sub(2)].trim().to_string();
+            let text = normalize_comment_text(&src[start..i.saturating_sub(2)]);
             if !text.contains("__REEFMT_") {
                 texts.push(text);
             }
@@ -183,6 +183,22 @@ pub(crate) fn collect_comment_texts_text(src: &str) -> Vec<String> {
 
     texts.sort();
     texts
+}
+
+fn normalize_comment_text(text: &str) -> String {
+    if !text.contains('\n') {
+        return text.trim().to_string();
+    }
+
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        let line = line.strip_prefix('*').unwrap_or(line);
+        let line = line.strip_prefix(' ').unwrap_or(line);
+        lines.push(line.trim_end());
+    }
+
+    lines.join("\n")
 }
 
 /// Verify that every comment in `original` is present in `formatted`.
@@ -996,6 +1012,13 @@ mod tests {
     fn comments_text_scanner_block_comment() {
         let texts = collect_comment_texts_text("/* block */\nconst x = 1;\n");
         assert_eq!(texts, vec!["block"]);
+    }
+
+    #[test]
+    fn comments_text_scanner_normalizes_banner_block_comments() {
+        let orig = "/*\n * src/css/academic.css\n *\n * Academic paper layout\n */\n";
+        let fmt = "/*\n * src/css/academic.css\n *\n * Academic paper layout\n */\n";
+        assert!(verify_comments_preserved(orig, fmt, "css").is_ok());
     }
 
     #[test]
