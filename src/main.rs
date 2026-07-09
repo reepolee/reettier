@@ -26,6 +26,20 @@ enum Mode {
     Diff,
 }
 
+fn executable_dir() -> PathBuf {
+    let exe = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("Error: cannot determine executable path: {}", e);
+        std::process::exit(1);
+    });
+
+    exe.parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            eprintln!("Error: executable path has no parent directory");
+            std::process::exit(1);
+        })
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -41,6 +55,10 @@ fn main() {
     }
     if take(&mut args, &["--version", "-v"]) {
         println!("reettier v{}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    if take(&mut args, &["--where"]) {
+        println!("{}", executable_dir().display());
         return;
     }
 
