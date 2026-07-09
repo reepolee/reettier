@@ -61,7 +61,7 @@ cat file.ts  | reettier --stdin .ts
 | `--verbose` | Also print already-formatted files. |
 | `--stdin [.ext]` | Read stdin, write stdout (extension defaults to `.ree`). |
 | `--init` | Create a starter `reettier.jsonc` in the current directory. |
-| `--version`, `-v` | Print the version. |
+| `--version`, `-v` | Print the bare version number. |
 | `--help`, `-h` | Print usage. |
 
 ### Two modes: indenter (default) and reprinter (`--full`)

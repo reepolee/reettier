@@ -54,7 +54,7 @@ fn main() {
         return;
     }
     if take(&mut args, &["--version", "-v"]) {
-        println!("reettier v{}", env!("CARGO_PKG_VERSION"));
+        println!("{}", env!("CARGO_PKG_VERSION"));
         return;
     }
     if take(&mut args, &["--where"]) {
@@ -309,7 +309,7 @@ fn print_diff(name: &str, old: &str, new: &str) {
 }
 
 fn print_help() {
-    println!("reettier v{} — layout-preserving formatter for .ree/.ts/.js/.css", env!("CARGO_PKG_VERSION"));
+    println!("reettier {} — layout-preserving formatter for .ree/.ts/.js/.css", env!("CARGO_PKG_VERSION"));
     println!();
     println!("USAGE:");
     println!("  reettier [OPTIONS] [PATH...]");
@@ -323,7 +323,7 @@ fn print_help() {
     println!("  --verbose                Also print already-formatted files");
     println!("  --stdin [.ext]           Read stdin, write stdout (ext defaults to .ree)");
     println!("  --init                   Create a starter reettier.jsonc in this directory");
-    println!("  --version, -v            Print version");
+    println!("  --version, -v            Print the bare version number");
     println!("  --help, -h               Print this help");
     println!();
     println!("CONFIG: reettier.jsonc in the current directory (optional).");
