@@ -117,13 +117,15 @@ cp target/release/reettier ~/.local/bin/   # macOS/Linux
 Releases are cut from a single machine (the Mac mini). `release.sh` cross-builds
 **all six targets** and publishes them as one GitHub Release:
 
+Version numbers use date-based `YY.M.PATCH` releases.
+
 - macOS arm64/x64 (native `cargo build`)
 - Linux x64/arm64 (`cargo zigbuild`)
 - Windows x64/arm64 (`cargo xwin build`)
 
 ```bash
 bash release.sh            # bump, tag, cross-build all targets, publish
-bash release.sh --minor    # bump the minor version instead of patch
+bash release.sh --minor    # bump the month component instead of patch
 bash release.sh --draft    # publish the release as a draft
 ```
 

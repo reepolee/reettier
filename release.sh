@@ -13,7 +13,7 @@
 #
 # Usage: bash release.sh [--draft] [--minor] [--force]
 #   --draft  Create the release as a draft (default: published)
-#   --minor  Bump the minor version instead of the patch version (default: patch)
+#   --minor  Bump the month component instead of the patch version (default: patch)
 #   --force  Release the current Cargo.toml version even if it is ahead of the tag
 #
 # Prerequisites (one-time, on the Mac):
@@ -96,34 +96,62 @@ fi
 
 bump_patch() {
 	local current="$1"
-	local major="${current%%.*}"
+	local year="${current%%.*}"
 	local rest="${current#*.}"
-	local minor="${rest%%.*}"
+	local month="${rest%%.*}"
 	local patch="${rest#*.}"
-	local new_patch=$((patch + 1))
-	echo "$major.$minor.$new_patch"
+	local new_patch=$((10#$patch + 1))
+	echo "$year.$month.$new_patch"
 }
 
 bump_minor() {
 	local current="$1"
-	local major="${current%%.*}"
+	local year="${current%%.*}"
 	local rest="${current#*.}"
-	local minor="${rest%%.*}"
-	local new_minor=$((minor + 1))
-	echo "$major.$new_minor.0"
+	local month="${rest%%.*}"
+	local patch="${rest#*.}"
+	local new_month=$((10#$month + 1))
+
+	if [ "$new_month" -gt 12 ]; then
+		year=$((10#$year + 1))
+		new_month=1
+	fi
+
+	echo "$year.$new_month.0"
+}
+
+current_release_version() {
+	local year month
+	year=$(date +%y)
+	month=$((10#$(date +%m)))
+	echo "$year.$month.0"
+}
+
+is_date_version() {
+	[[ "$1" =~ ^[0-9]{2}\.[0-9]+\.[0-9]+$ ]]
 }
 
 # Returns 0 (true) if $1 is a greater version than $2
 version_gt() {
-	local a_major="${1%%.*}"; local a_rest="${1#*.}"
-	local a_minor="${a_rest%%.*}"; local a_patch="${a_rest#*.}"
-	local b_major="${2%%.*}"; local b_rest="${2#*.}"
-	local b_minor="${b_rest%%.*}"; local b_patch="${b_rest#*.}"
+	local a_year a_month a_patch b_year b_month b_patch
+	local a_rest b_rest
 
-	[ "$a_major" -gt "$b_major" ] && return 0
-	[ "$a_major" -lt "$b_major" ] && return 1
-	[ "$a_minor" -gt "$b_minor" ] && return 0
-	[ "$a_minor" -lt "$b_minor" ] && return 1
+	a_year="${1%%.*}"; a_rest="${1#*.}"
+	a_month="${a_rest%%.*}"; a_patch="${a_rest#*.}"
+	b_year="${2%%.*}"; b_rest="${2#*.}"
+	b_month="${b_rest%%.*}"; b_patch="${b_rest#*.}"
+
+	a_year=$((10#$a_year))
+	a_month=$((10#$a_month))
+	a_patch=$((10#$a_patch))
+	b_year=$((10#$b_year))
+	b_month=$((10#$b_month))
+	b_patch=$((10#$b_patch))
+
+	[ "$a_year" -gt "$b_year" ] && return 0
+	[ "$a_year" -lt "$b_year" ] && return 1
+	[ "$a_month" -gt "$b_month" ] && return 0
+	[ "$a_month" -lt "$b_month" ] && return 1
 	[ "$a_patch" -gt "$b_patch" ]
 }
 
@@ -168,7 +196,9 @@ latest_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
 if [ -n "$latest_tag" ]; then
 	# Verify local version matches the latest tag before proceeding.
 	tag_version="${latest_tag#v}"
-	if [ "$tag_version" != "$version" ]; then
+	if is_date_version "$version" && ! is_date_version "$tag_version"; then
+		echo "  (Migrating from semver tag $tag_version to date-based Cargo.toml version $version)"
+	elif [ "$tag_version" != "$version" ]; then
 		if version_gt "$tag_version" "$version"; then
 			echo "  (Note: latest tag is $tag_version, Cargo.toml has $version — using tag version)"
 			version="$tag_version"
@@ -189,6 +219,13 @@ else
 fi
 
 tag="v$version"
+migration_mode=false
+if [ -n "$latest_tag" ]; then
+	tag_version="${latest_tag#v}"
+	if is_date_version "$version" && ! is_date_version "$tag_version"; then
+		migration_mode=true
+	fi
+fi
 
 # When --force is used and Cargo.toml is already ahead of the tag, skip the bump
 force_skip_bump=false
@@ -199,14 +236,20 @@ if [ "$force" = true ] && [ -n "$latest_tag" ]; then
 	fi
 fi
 
-if [ "$new_commits" -gt 0 ] && [ "$force_skip_bump" = false ]; then
+if [ "$new_commits" -gt 0 ] && [ "$force_skip_bump" = false ] && [ "$migration_mode" = false ]; then
 	# Code has changed since last release → bump version
 	if [ "$minor_bump" = true ]; then
 		new_version=$(bump_minor "$version")
-		bump_type="minor"
+		bump_type="month"
 	else
-		new_version=$(bump_patch "$version")
-		bump_type="patch"
+		current_version=$(current_release_version)
+		if version_gt "$current_version" "$version"; then
+			new_version="$current_version"
+			bump_type="date bucket"
+		else
+			new_version=$(bump_patch "$version")
+			bump_type="patch"
+		fi
 	fi
 	echo "═══ reettier release $new_version (all targets) ═══"
 	echo "  (Bumping $bump_type from $version → $new_version, $new_commits commits since $latest_tag)"
