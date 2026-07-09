@@ -198,6 +198,7 @@ fn normalize_comment_text(text: &str) -> String {
         lines.push(line.trim_end());
     }
 
+    lines.retain(|line| !line.is_empty());
     lines.join("\n")
 }
 
@@ -1019,6 +1020,13 @@ mod tests {
         let orig = "/*\n * src/css/academic.css\n *\n * Academic paper layout\n */\n";
         let fmt = "/*\n * src/css/academic.css\n *\n * Academic paper layout\n */\n";
         assert!(verify_comments_preserved(orig, fmt, "css").is_ok());
+    }
+
+    #[test]
+    fn comments_text_scanner_ignores_banner_wrapper_reflow() {
+        let orig = "/**\n * src/css/academic.css\n *\n * Academic paper layout\n */\n";
+        let fmt = "/*\n * src/css/academic.css\n * Academic paper layout\n */\n";
+        assert_eq!(collect_comment_texts_text(orig), collect_comment_texts_text(fmt));
     }
 
     #[test]
