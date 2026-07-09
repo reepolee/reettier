@@ -567,10 +567,11 @@ fn reindent_block_comment(comment: &str, original_indent: &str, new_indent: &str
             out.push_str(new_indent);
             out.push_str(line);
         } else {
-            // Content/closing lines carry original_indent as prefix; strip it.
-            let stripped = if line.len() >= base { &line[base..] } else { line.trim_start() };
+            // Preserve the original continuation line shape exactly.
+            // The formatter should not rewrite the comment's internal `*` layout.
+            let stripped = if line.len() >= base { &line[base..] } else { line };
             if stripped.trim().is_empty() {
-                // Whitespace-only line — emit blank (no trailing spaces)
+                // Whitespace-only line - emit a true blank line inside the comment.
             } else {
                 out.push_str(new_indent);
                 out.push_str(stripped);
@@ -2026,6 +2027,44 @@ fn wrap_long_method_chains(code: &str, max_width: usize) -> String {
     apply_with_context(code, |line| try_split_method_chain(line, max_width))
 }
 
+fn normalize_css_block_comment_indent(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut in_block_comment = false;
+    let mut comment_indent = String::new();
+
+    for line in input.lines() {
+        let trimmed = line.trim_start();
+
+        if in_block_comment && trimmed.is_empty() {
+            output.push_str("");
+        } else if in_block_comment && (trimmed.starts_with('*') || trimmed.starts_with("*/")) {
+            output.push_str(&comment_indent);
+            output.push_str(trimmed);
+        } else {
+            output.push_str(line);
+        }
+
+        output.push('\n');
+
+        if trimmed.starts_with("/*") && !trimmed.contains("*/") {
+            in_block_comment = true;
+            let indent_len = line.len() - trimmed.len();
+            comment_indent = line[..indent_len].to_string();
+        }
+
+        if in_block_comment && trimmed.contains("*/") {
+            in_block_comment = false;
+            comment_indent.clear();
+        }
+    }
+
+    if !input.ends_with('\n') && output.ends_with('\n') {
+        output.pop();
+    }
+
+    output
+}
+
 pub(crate) fn format_css_content(input: &str, wrap_width: usize) -> String {
     use malva::Syntax;
     use malva::config::{FormatOptions, LayoutOptions, LanguageOptions, LineBreak};
@@ -2039,7 +2078,7 @@ pub(crate) fn format_css_content(input: &str, wrap_width: usize) -> String {
         language: LanguageOptions::default(),
     };
     match malva::format_text(input, Syntax::Css, &options) {
-        Ok(formatted) => formatted,
+        Ok(formatted) => normalize_css_block_comment_indent(&formatted),
         Err(_) => input.to_string(),
     }
 }
@@ -2347,6 +2386,17 @@ mod tests {
         assert!(result.contains("/**"), "block comment /** should be preserved");
         assert!(result.contains("* doc\n"), "block comment content should be preserved (space before * is normalized)");
         assert!(result.contains("*/\nexport"), "*/ should be on its own line before export");
+    }
+
+    #[test]
+    fn normalizes_css_jsdoc_block_indent() {
+        let src = "/**\n\t* test-files/academic.css\n\t*\n\t* Academic paper layout — a clean, print-inspired stylesheet for the\n\t* `academic.layout.ree` template. Designed to feel like a LaTeX-rendered PDF\n\t* on screen: serif body, generous measure, subtle paper background.\n\t*/\n";
+        let result = format_code_content(src, "css", 180, CollapseConfig::uniform(true, 3), false);
+        let expected = "/**\n* test-files/academic.css\n*\n* Academic paper layout — a clean, print-inspired stylesheet for the\n* `academic.layout.ree` template. Designed to feel like a LaTeX-rendered PDF\n* on screen: serif body, generous measure, subtle paper background.\n*/\n";
+        assert_eq!(result, expected, "CSS JSDoc block should use unindented star lines");
+
+        let pass2 = format_code_content(&result, "css", 180, CollapseConfig::uniform(true, 3), false);
+        assert_eq!(pass2, expected, "CSS JSDoc block should stay stable after formatting");
     }
 
     #[test]
