@@ -117,7 +117,7 @@ bump_minor() {
 		new_month=1
 	fi
 
-	echo "$year.$new_month.0"
+	printf "%s.%02d.0\n" "$year" "$new_month"
 }
 
 current_release_version() {
@@ -127,8 +127,41 @@ current_release_version() {
 	echo "$year.$month.0"
 }
 
+format_release_version() {
+	local current="$1"
+	local year month patch
+	local rest
+
+	year="${current%%.*}"
+	rest="${current#*.}"
+	month="${rest%%.*}"
+	patch="${rest#*.}"
+
+	printf "%s.%02d.%s\n" "$year" "$((10#$month))" "$patch"
+}
+
 is_date_version() {
 	[[ "$1" =~ ^[0-9]{2}\.[0-9]+\.[0-9]+$ ]]
+}
+
+# Returns 0 (true) if $1 and $2 are the same version numerically
+version_eq() {
+	local a_year a_month a_patch b_year b_month b_patch
+	local a_rest b_rest
+
+	a_year="${1%%.*}"; a_rest="${1#*.}"
+	a_month="${a_rest%%.*}"; a_patch="${a_rest#*.}"
+	b_year="${2%%.*}"; b_rest="${2#*.}"
+	b_month="${b_rest%%.*}"; b_patch="${b_rest#*.}"
+
+	a_year=$((10#$a_year))
+	a_month=$((10#$a_month))
+	a_patch=$((10#$a_patch))
+	b_year=$((10#$b_year))
+	b_month=$((10#$b_month))
+	b_patch=$((10#$b_patch))
+
+	[ "$a_year" -eq "$b_year" ] && [ "$a_month" -eq "$b_month" ] && [ "$a_patch" -eq "$b_patch" ]
 }
 
 # Returns 0 (true) if $1 is a greater version than $2
@@ -160,6 +193,7 @@ if [ -z "$version" ]; then
 	echo "ERROR: Could not find version in Cargo.toml" >&2
 	exit 1
 fi
+release_version=$(format_release_version "$version")
 
 # ──────────────────────────────────────────────
 # All targets (built from this one Mac)
@@ -198,6 +232,10 @@ if [ -n "$latest_tag" ]; then
 	tag_version="${latest_tag#v}"
 	if is_date_version "$version" && ! is_date_version "$tag_version"; then
 		echo "  (Migrating from semver tag $tag_version to date-based Cargo.toml version $version)"
+	elif version_eq "$tag_version" "$version"; then
+		if [ "$tag_version" != "$release_version" ]; then
+			echo "  (Normalizing tag $tag_version to zero-padded release version $release_version)"
+		fi
 	elif [ "$tag_version" != "$version" ]; then
 		if version_gt "$tag_version" "$version"; then
 			echo "  (Note: latest tag is $tag_version, Cargo.toml has $version — using tag version)"
@@ -218,7 +256,7 @@ else
 	new_commits=1
 fi
 
-tag="v$version"
+tag="v$release_version"
 migration_mode=false
 if [ -n "$latest_tag" ]; then
 	tag_version="${latest_tag#v}"
@@ -258,7 +296,8 @@ if [ "$new_commits" -gt 0 ] && [ "$force_skip_bump" = false ] && [ "$migration_m
 	sed -i "s/version = \"$version\"/version = \"$new_version\"/" Cargo.toml
 
 	version="$new_version"
-	tag="v$version"
+	release_version=$(format_release_version "$version")
+	tag="v$release_version"
 	do_bump=true
 
 	if [ -f CHANGELOG.md ]; then
