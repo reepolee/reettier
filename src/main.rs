@@ -10,6 +10,11 @@ mod engine;
 mod format;
 mod full;
 mod ree;
+
+fn display_version() -> String {
+    let mut parts = env!("CARGO_PKG_VERSION").split('.');
+    format!("{}.{:02}.{}", parts.next().unwrap_or("0"), parts.next().unwrap_or("0").parse::<u32>().unwrap_or(0), parts.next().unwrap_or("0"))
+}
 mod tokenizer;
 
 use config::Config;
@@ -54,7 +59,7 @@ fn main() {
         return;
     }
     if take(&mut args, &["--version", "-v"]) {
-		println!("26.07.1");
+		println!("{}", display_version());
         return;
     }
     if take(&mut args, &["--where"]) {
@@ -309,7 +314,7 @@ fn print_diff(name: &str, old: &str, new: &str) {
 }
 
 fn print_help() {
-        println!("reettier 26.07.1 — layout-preserving formatter for .ree/.ts/.js/.css");
+    println!("reettier {} — layout-preserving formatter for .ree/.ts/.js/.css", display_version());
     println!();
     println!("USAGE:");
     println!("  reettier [OPTIONS] [PATH...]");
