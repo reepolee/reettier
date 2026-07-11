@@ -381,8 +381,8 @@ if [ "$do_bump" = true ]; then
 	echo ""
 	echo "→ Committing version bump..."
 	git add Cargo.toml Cargo.lock; [ -f CHANGELOG.md ] && git add CHANGELOG.md || true
-	git commit -m "Bump version to $version"
-	echo "  Committed: Bump version to $version"
+	git commit -m "Bump version to $release_version"
+	echo "  Committed: Bump version to $release_version"
 fi
 
 # ──────────────────────────────────────────────
