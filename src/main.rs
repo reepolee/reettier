@@ -54,7 +54,7 @@ fn main() {
         return;
     }
     if take(&mut args, &["--version", "-v"]) {
-        println!("{}", env!("CARGO_PKG_VERSION"));
+		println!("26.07.1");
         return;
     }
     if take(&mut args, &["--where"]) {
@@ -309,7 +309,7 @@ fn print_diff(name: &str, old: &str, new: &str) {
 }
 
 fn print_help() {
-    println!("reettier {} — layout-preserving formatter for .ree/.ts/.js/.css", env!("CARGO_PKG_VERSION"));
+        println!("reettier 26.07.1 — layout-preserving formatter for .ree/.ts/.js/.css");
     println!();
     println!("USAGE:");
     println!("  reettier [OPTIONS] [PATH...]");
