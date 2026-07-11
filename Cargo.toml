@@ -1,6 +1,6 @@
 [package]
 name = "reettier"
-version = "26.7.3"
+version = "26.7.4"
 edition = "2021"
 description = "A layout-preserving formatter for Ree Templates and their embedded JS/TS/CSS."
 
