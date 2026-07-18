@@ -11,7 +11,10 @@ punctuation spacing, and group shape. You steer the layout — reettier keeps it
 
 1. **Never auto-break** — reettier won't introduce line breaks on its own.
 2. **Correct indentation** for HTML/CSS/JS nesting.
-3. **Trim & space** — punctuation-level spacing; collapse blank runs to one.
+3. **Trim & space** — punctuation-level spacing; collapse blank runs to one, and
+   collapse redundant statement-level semicolons (empty-statement lines and `;;`
+   runs) to a single terminator. Semicolons inside `for (…;…;…)` headers and real
+   empty loop bodies (`while (x);`) are left alone.
 4. **Group switch** — a group explodes one-per-line when you break after its first
    element, and collapses otherwise. A group is a **comma** sequence in `(…)`/`[…]`/`{…}`,
    a **semicolon** member list in a type/interface literal (`{ a: string; b: number }`),

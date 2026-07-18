@@ -132,8 +132,14 @@ fn format_flavored(src: &str, indent: &str, css: bool) -> String {
     // Self-verify safety net (ADR-0001: the linter owns correctness, but the
     // formatter must never *corrupt*). If our output doesn't preserve the
     // meaning-bearing token stream, we made a mistake — emit the original
-    // unchanged so an edge case can never mangle code.
-    if crate::tokenizer::signature(src, css) == crate::tokenizer::signature(&out, css) {
+    // unchanged so an edge case can never mangle code. Redundant statement-level
+    // semicolons (empty statements / `;;` runs) are the one thing the formatter
+    // deliberately drops, so both sides are normalized through
+    // `strip_redundant_semicolons` first — real token loss still trips the net.
+    use crate::tokenizer::{signature, strip_redundant_semicolons};
+    let sig_src = strip_redundant_semicolons(&signature(src, css));
+    let sig_out = strip_redundant_semicolons(&signature(&out, css));
+    if sig_src == sig_out {
         out
     } else {
         if std::env::var("REETTIER_DEBUG").is_ok() {
@@ -299,6 +305,36 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
 
     let explodes = |fid: usize| frames[fid].explode;
 
+    // ── Redundant statement-level semicolons (empty statements, `;;` runs) ──
+    // Drop a `;` whose previous kept significant token is another `;`, a block-
+    // opening `{`, or the start of input — but never one inside `(…)`/`[…]`
+    // (for-headers, array holes). Mirrors `tokenizer::strip_redundant_semicolons`
+    // so the self-verify agrees these removals are intentional, not corruption.
+    let mut drop_sig = vec![false; m];
+    {
+        let mut prev_kept: Option<usize> = None;
+        for k in 0..m {
+            if kind(k) == TokKind::Semicolon {
+                let in_paren_bracket = semicolon_frame[k]
+                    .is_some_and(|fid| matches!(bchar(frames[fid].open_k), b'(' | b'['));
+                if !in_paren_bracket {
+                    let redundant = match prev_kept {
+                        None => true,
+                        Some(p) => {
+                            kind(p) == TokKind::Semicolon
+                                || (kind(p) == TokKind::Open && bchar(p) == b'{')
+                        }
+                    };
+                    if redundant {
+                        drop_sig[k] = true;
+                        continue; // keep prev_kept pointing past the dropped `;`
+                    }
+                }
+            }
+            prev_kept = Some(k);
+        }
+    }
+
     // A `{` opens a switch body when it directly follows `switch (…)`: prev sig is
     // a `)` whose matching `(` is preceded by the `switch` keyword.
     let is_switch_open = |k: usize| -> bool {
@@ -319,6 +355,11 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
     // ── Build the emit list ──
     let mut items: Vec<Out> = Vec::new();
     for k in 0..m {
+        // Drop a redundant statement-level semicolon (empty statement / `;;`).
+        if drop_sig[k] {
+            continue;
+        }
+
         // Drop an author trailing comma when its group collapses.
         if let Some(fid) = comma_frame[k] {
             let is_trailing = k + 1 < m && close_frame[k + 1] == Some(fid);
@@ -378,6 +419,10 @@ fn format_inner(src: &str, indent: &str, css: bool) -> String {
         let is_close_brace = kind(k) == TokKind::Close && bchar(k) == b'}';
         let closes_stmt_block = is_close_brace
             && close_frame[k].map_or(false, |fid| frames[fid].stmt_block);
+
+        // If leading token(s) were dropped, the first surviving token starts the
+        // file — never with a break (which would emit a blank first line).
+        let brk = if items.is_empty() { 0 } else { brk };
 
         items.push(Out {
             text: text(k),
@@ -1086,6 +1131,66 @@ mod tests {
         // Empty header: no space injected before the `)`.
         let empty = "for (;;) {\n\tx();\n}\n";
         assert_eq!(fmt(empty), empty, "for(;;) got a stray space");
+    }
+
+    #[test]
+    fn stray_semicolon_line_is_removed() {
+        // The reported case: a lone `;` (empty statement) on its own line between
+        // statements is dropped, and the following line pulls up.
+        let input = "import { a } from \"x\";\n;\nimport { b } from \"y\";\n";
+        assert_eq!(
+            fmt(input),
+            "import { a } from \"x\";\nimport { b } from \"y\";\n"
+        );
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn stray_semicolon_with_blank_lines_collapses() {
+        // A `;` surrounded by blank lines leaves a single blank between the real
+        // statements (blank-line collapse), not a `;` line.
+        let input = "const a = 1;\n\n;\n\nexport const b = 2;\n";
+        assert_eq!(fmt(input), "const a = 1;\n\nexport const b = 2;\n");
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn double_semicolon_is_normalized() {
+        // `;;` on one line → a single `;`.
+        assert_eq!(fmt("const a = 1;;\n"), "const a = 1;\n");
+        // A run of empty statements collapses to the one real terminator.
+        assert_eq!(fmt("foo();;;\n"), "foo();\n");
+    }
+
+    #[test]
+    fn leading_semicolon_is_removed() {
+        // An empty statement at the very start of the file (or block) is dropped
+        // without leaving a blank first line.
+        assert_eq!(fmt(";\nconst a = 1;\n"), "const a = 1;\n");
+        assert_eq!(
+            fmt("function f() {\n\t;\n\treturn 1;\n}\n"),
+            "function f() {\n\treturn 1;\n}\n"
+        );
+    }
+
+    #[test]
+    fn real_empty_statement_after_condition_is_kept() {
+        // A `;` that terminates a real (if empty) loop body is NOT an empty
+        // statement to drop — its previous token is `)`, not `;`/`{`/start.
+        let input = "while (drain());\n";
+        assert_eq!(fmt(input), input);
+        assert_idempotent(input);
+    }
+
+    #[test]
+    fn for_header_semicolons_never_dropped() {
+        // Guard: the `;`s inside a for-header live in `(…)` and must survive,
+        // including the empty-clause `for (;;)` form.
+        assert_eq!(fmt("for (;;) {\n\tx();\n}\n"), "for (;;) {\n\tx();\n}\n");
+        assert_eq!(
+            fmt("for (let i = 0; i < n; i++) {\n\tx();\n}\n"),
+            "for (let i = 0; i < n; i++) {\n\tx();\n}\n"
+        );
     }
 
     #[test]

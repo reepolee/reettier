@@ -96,6 +96,45 @@ pub fn signature(src: &str, css: bool) -> Vec<(TokKind, &str)> {
         .collect()
 }
 
+/// Collapse redundant statement-level semicolons in a signature stream: empty
+/// statements and `;;` runs. A statement-level `;` is redundant when the
+/// previous kept significant token is another `;`, a block-opening `{`, or the
+/// start of input. Semicolons inside `(…)` (for-headers) or `[…]` are never
+/// touched. The formatter drops exactly these, so the self-verify runs both its
+/// reference (source) and result through this before comparing — otherwise the
+/// intentional removal would look like token loss and revert the file.
+pub fn strip_redundant_semicolons<'a>(sig: &[(TokKind, &'a str)]) -> Vec<(TokKind, &'a str)> {
+    let mut out: Vec<(TokKind, &'a str)> = Vec::with_capacity(sig.len());
+    let mut stack: Vec<u8> = Vec::new();
+    for &(kind, text) in sig {
+        match kind {
+            TokKind::Open => {
+                stack.push(text.as_bytes()[0]);
+                out.push((kind, text));
+            }
+            TokKind::Close => {
+                stack.pop();
+                out.push((kind, text));
+            }
+            TokKind::Semicolon => {
+                let in_paren_bracket = matches!(stack.last(), Some(b'(') | Some(b'['));
+                let redundant = !in_paren_bracket
+                    && match out.last() {
+                        None => true,
+                        Some(&(TokKind::Semicolon, _)) => true,
+                        Some(&(TokKind::Open, t)) => t.as_bytes()[0] == b'{',
+                        _ => false,
+                    };
+                if !redundant {
+                    out.push((kind, text));
+                }
+            }
+            _ => out.push((kind, text)),
+        }
+    }
+    out
+}
+
 pub fn tokenize(src: &str) -> Vec<Token> {
     tokenize_impl(src, false)
 }
