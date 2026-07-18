@@ -6,8 +6,7 @@
 - Indenter now normalizes redundant statement-level semicolons: empty-statement
   lines (a lone `;`) and `;;` runs collapse to a single terminator. Semicolons
   inside `for (…;…;…)` headers and real empty loop bodies (`while (x);`) are left
-  untouched. The self-verify net recognizes the removal, so files are never
-  reverted for it.
+  untouched. The self-verify net recognizes the removal, so files are never reverted for it.
 
 
 ## [0.1.0] - 2026-07-01
