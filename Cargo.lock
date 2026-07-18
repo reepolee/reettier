@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "reettier"
-version = "26.7.5"
+version = "26.7.6"
 dependencies = [
  "glob",
  "json5",
