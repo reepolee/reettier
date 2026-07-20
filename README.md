@@ -1,21 +1,21 @@
 # reettier
 
 A **layout-preserving** formatter for Ree Templates (`.ree`) and their embedded
-JavaScript, TypeScript, and CSS — "(p)re(e)ttier".
+JavaScript, TypeScript, and CSS - "(p)re(e)ttier".
 
 Unlike a reflow formatter, reettier does **not** wrap code to a target width. The
 author's own line breaks are the source of truth; reettier only fixes indentation,
-punctuation spacing, and group shape. You steer the layout — reettier keeps it tidy.
+punctuation spacing, and group shape. You steer the layout - reettier keeps it tidy.
 
 ## The four rules
 
-1. **Never auto-break** — reettier won't introduce line breaks on its own.
+1. **Never auto-break** - reettier won't introduce line breaks on its own.
 2. **Correct indentation** for HTML/CSS/JS nesting.
-3. **Trim & space** — punctuation-level spacing; collapse blank runs to one, and
+3. **Trim & space** - punctuation-level spacing; collapse blank runs to one, and
    collapse redundant statement-level semicolons (empty-statement lines and `;;`
    runs) to a single terminator. Semicolons inside `for (…;…;…)` headers and real
    empty loop bodies (`while (x);`) are left alone.
-4. **Group switch** — a group explodes one-per-line when you break after its first
+4. **Group switch** - a group explodes one-per-line when you break after its first
    element, and collapses otherwise. A group is a **comma** sequence in `(…)`/`[…]`/`{…}`,
    a **semicolon** member list in a type/interface literal (`{ a: string; b: number }`),
    or an HTML attribute list. Trailing commas are managed by shape: arrays `[…]` and
@@ -23,7 +23,7 @@ punctuation spacing, and group shape. You steer the layout — reettier keeps it
    and CSS never do. Statement blocks and multi-declarators (`let a = 1, b = 2`) are
    never groups.
 
-It's a pure Rust binary with zero runtime dependencies — no Node.js required. It
+It's a pure Rust binary with zero runtime dependencies - no Node.js required. It
 self-verifies: if a format wouldn't preserve the meaning-bearing tokens, the file
 is left unchanged, so it can never corrupt your code.
 
@@ -102,8 +102,8 @@ root to customize file discovery and the indent string:
 ```
 
 The top-level keys drive file discovery (shared by both modes) and the indenter.
-Reprinter (`--full`) knobs — `wrapWidth`, the `collapse*` limits, `tabWidth`,
-`hugCallArgs`, `oneline` — live under a nested `"full"` block and only apply with
+Reprinter (`--full`) knobs - `wrapWidth`, the `collapse*` limits, `tabWidth`,
+`hugCallArgs`, `oneline` - live under a nested `"full"` block and only apply with
 `--full`. Run `reettier --init` to scaffold a file with every key documented.
 
 ## Development
