@@ -73,6 +73,16 @@ fn extract_blocks(src: &str, indent: &str) -> (String, Vec<Block>) {
     let mut masked = String::new();
     let mut blocks: Vec<Block> = Vec::new();
     let mut i = 0;
+    // An opening fence glued to preceding content on its line (e.g.
+    // `<md-text type="code">```ts`, no newline before the backticks) is not
+    // masked below — `fence_here` only opens at true line start, since a
+    // glued opener's *own* content is markup-adjacent text, not a clean
+    // verbatim span. But its closer is a normal own-line ``` and would
+    // otherwise be misread as the start of a brand new fence, swallowing
+    // everything up to the *next* accidental closer. Tracking "currently past
+    // a glued opener, mark X, run length N" lets the real closer be recognized
+    // and passed through as plain text instead.
+    let mut glued_fence: Option<(u8, usize)> = None;
 
     while i < n {
         // Verbatim: <pre>, <textarea>, HTML comment.
@@ -87,6 +97,34 @@ fn extract_blocks(src: &str, indent: &str) -> (String, Vec<Block>) {
                 push_block(&mut masked, &mut blocks, Block::Verbatim(src[i..after].to_string()));
                 i = after;
                 continue;
+            }
+        }
+        // Fenced code block (```/~~~), wherever it appears in markup — most
+        // commonly a code sample inside <md-text type="code"> or a component
+        // slot. See `fence_here` for why this must be opaque to tag scanning.
+        if b[i] == b'`' || b[i] == b'~' {
+            if let Some((mark, run_len)) = glued_fence {
+                if b[i] == mark && closer_run_here(src, i, mark, run_len) {
+                    glued_fence = None;
+                    // Fall through to the generic copy below: pass the
+                    // closer through as plain text, matching how the glued
+                    // opener itself was left untouched.
+                } else if at_line_start(src, i) {
+                    if let Some(end) = fence_here(src, i) {
+                        push_block(&mut masked, &mut blocks, Block::Verbatim(src[i..end].to_string()));
+                        i = end;
+                        continue;
+                    }
+                }
+            } else if at_line_start(src, i) {
+                if let Some(end) = fence_here(src, i) {
+                    push_block(&mut masked, &mut blocks, Block::Verbatim(src[i..end].to_string()));
+                    i = end;
+                    continue;
+                }
+            } else if let Some(run_len) = fence_run_len_here(src, i) {
+                // Glued opener: record it and fall through untouched.
+                glued_fence = Some((b[i], run_len));
             }
         }
         // Raw JS block: {{ … }}
@@ -769,6 +807,112 @@ fn script_is_js(open_tag: &str) -> bool {
     )
 }
 
+/// True when every byte since the start of the line (or the start of `src`)
+/// is a space or tab — i.e. `pos` is a fence marker's only possible column.
+fn at_line_start(src: &str, pos: usize) -> bool {
+    let b = src.as_bytes();
+    let mut j = pos;
+    while j > 0 {
+        j -= 1;
+        match b[j] {
+            b'\n' => return true,
+            b' ' | b'\t' => continue,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Length of the run of `mark` characters starting at `pos`, if it is 3 or
+/// more (the minimum Markdown fence length) — regardless of what precedes it
+/// on the line. Used both for a clean own-line fence opener and for a fence
+/// glued to preceding content (`<md-text type="code">```ts`), which is a
+/// valid opener in this project's own convention even though it isn't at true
+/// line start.
+fn fence_run_len_here(src: &str, pos: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mark = b[pos];
+    if mark != b'`' && mark != b'~' {
+        return None;
+    }
+    let mut j = pos;
+    while j < n && b[j] == mark {
+        j += 1;
+    }
+    let run_len = j - pos;
+    if run_len < 3 { None } else { Some(run_len) }
+}
+
+/// True when the line containing `pos` is, once trimmed, exactly a run of
+/// `mark` of length `>= run_len` and nothing else — a valid closing fence line
+/// for an opener of that mark and length.
+fn closer_run_here(src: &str, pos: usize, mark: u8, run_len: usize) -> bool {
+    let b = src.as_bytes();
+    let n = b.len();
+    let mut line_start = pos;
+    while line_start > 0 && b[line_start - 1] != b'\n' {
+        line_start -= 1;
+    }
+    let mut line_end = pos;
+    while line_end < n && b[line_end] != b'\n' {
+        line_end += 1;
+    }
+    let line = src[line_start..line_end].trim();
+    !line.is_empty() && line.len() >= run_len && line.bytes().all(|c| c == mark)
+}
+
+/// If a Markdown fenced code block (` ``` `/`~~~`, 3+ marks, opening the line at
+/// `pos`) starts here, return the end of its closing fence line (or end of file
+/// if unterminated). Content between the fences is prose/code-sample text —
+/// often embedded in a component slot (`<md-text type="code"> … </md-text>`) —
+/// not real markup, so a bare `<word>` inside it must never be read as an HTML
+/// tag by the depth-based indenter. Masked as one opaque `Verbatim` block, the
+/// same way `<pre>`/`<textarea>` already are.
+///
+/// Only fires when `pos` is at true line start; a fence glued to preceding
+/// content on the same line is handled separately (see `glued_fence` in
+/// `extract_blocks`) because masking it here would also swallow that
+/// preceding content into the verbatim span.
+fn fence_here(src: &str, pos: usize) -> Option<usize> {
+    if !at_line_start(src, pos) {
+        return None;
+    }
+    let b = src.as_bytes();
+    let n = b.len();
+    let mark = b[pos];
+    let run_len = fence_run_len_here(src, pos)?;
+    let j = pos + run_len;
+    // A backtick fence's info string can't itself contain a backtick
+    // (CommonMark); skip to end of the opener's line either way.
+    let mut k = j;
+    while k < n && b[k] != b'\n' {
+        k += 1;
+    }
+    let mut line_start = if k < n { k + 1 } else { k };
+    loop {
+        if line_start >= n {
+            return Some(n); // unterminated: rest of file is fence content
+        }
+        let mut p = line_start;
+        while p < n && b[p] != b'\n' {
+            p += 1;
+        }
+        let line = src[line_start..p].trim();
+        let is_closer = !line.is_empty()
+            && line.chars().all(|c| c == mark as char)
+            && line.len() >= run_len;
+        if is_closer {
+            // Stop at the closer, not past its newline — the newline is
+            // ordinary markup structure (like the boundary after `</pre>`)
+            // and must stay outside the masked span so the line following
+            // the fence isn't spliced onto its last line.
+            return Some(p);
+        }
+        line_start = if p < n { p + 1 } else { p };
+    }
+}
+
 fn open_tag_here(src: &str, pos: usize) -> Option<(&'static str, Lang)> {
     for (tag, lang) in [("script", Lang::Js), ("style", Lang::Css)] {
         if tag_matches(src, pos, tag) {
@@ -894,6 +1038,105 @@ mod tests {
         let input = "<div>\n<pre>\n  weird\n    indent\n</pre>\n</div>\n";
         let out = fmt(input);
         assert!(out.contains("  weird\n    indent"), "pre mangled:\n{out}");
+    }
+
+    // Regression: a fenced code sample inside a custom element (`<md-text
+    // type="code">`, common in the docs site's own .ree templates) is not a
+    // <pre>/<textarea>, so its content used to be scanned as ordinary markup.
+    // A bare `<word>`-shaped line inside the fence — e.g. a placeholder like
+    // `<blog_dir>` in a shell comment — was then read as an unclosed HTML tag
+    // open, which threw off nesting depth for every line after it: the closing
+    // fence and the tag that follows both drifted one level deeper, and on a
+    // second format pass the drift compounded further (not idempotent).
+    #[test]
+    fn fenced_code_block_is_verbatim() {
+        let input = "<md-text type=\"code\">\n\t```bash\n\tbun rss  # dist/<blog_dir>/feed.xml\n\t```\n</md-text>\n\n<div>after</div>\n";
+        assert_eq!(fmt(input), input, "fence content must not be touched");
+        assert_eq!(fmt(&fmt(input)), input, "must be idempotent");
+    }
+
+    #[test]
+    fn fenced_code_block_bare_tag_does_not_shift_depth() {
+        // Same shape without the wrapping component, and with a plain tag
+        // rather than an underscore-name one, to isolate the mechanism from
+        // any md-text-specific handling.
+        let input = "<div>\n\t```html\n\techo <foo>\n\t```\n</div>\n<p>sibling</p>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn tilde_fence_is_verbatim() {
+        let input = "<div>\n\t~~~html\n\t<foo>\n\t~~~\n</div>\n<p>sibling</p>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn fence_inside_ree_if_block() {
+        // The wrapping tag and directive still get normal Rule-2 indentation;
+        // only the fence's *own* content stays opaque to tag scanning and
+        // untouched (the `const x = <foo>;` line keeps its author indent).
+        let input = "{#if show}\n<md-text type=\"code\">\n\t```js\n\tconst x = <foo>;\n\t```\n</md-text>\n{/if}\n<p>after</p>\n";
+        let expected = "{#if show}\n\t<md-text type=\"code\">\n\t\t```js\n\tconst x = <foo>;\n\t```\n\t</md-text>\n{/if}\n<p>after</p>\n";
+        let out = fmt(input);
+        assert_eq!(out, expected, "got:\n{out}");
+        assert_eq!(fmt(&out), out, "must be idempotent");
+    }
+
+    #[test]
+    fn unterminated_fence_does_not_panic() {
+        // No closing fence: masked to end-of-file rather than mis-scanned.
+        let input = "<div>\n\t```js\n\tconst x = <foo>;\n</div>\n";
+        let out = fmt(input);
+        assert_eq!(out, input, "unterminated fence must be left alone, not reformatted");
+    }
+
+    // Regression: a fence that opens glued to preceding content on its line
+    // (`<md-text type="code">```ts`, no newline before the backticks — this
+    // project's own docs use exactly this shape to save a line) is correctly
+    // left unmasked, since masking it would swallow the tag into the verbatim
+    // span. But its bare, own-line closer (```) satisfies `at_line_start` on
+    // its own and — without tracking the glued opener — used to be misread as
+    // the start of a *new* fence, which then greedily consumed everything up
+    // to the next accidental closer: real content downstream (another
+    // md-text/fence block, its wrapping tags, sibling elements) got corrupted
+    // or re-indented. This is the actual failure mode found in
+    // docs/reeweb/index.ree in production.
+    #[test]
+    fn glued_fence_opener_does_not_corrupt_later_content() {
+        let input = concat!(
+            "<div>\n",
+            "\t<md-text type=\"code\">```ts\n",
+            "\t\tconst x = 1\n",
+            "\t\t```\n",
+            "\t</md-text>\n",
+            "</div>\n",
+            "\n",
+            "<md-text type=\"code\">\n",
+            "\t```bash\n",
+            "\tbun rss  # dist/<blog_dir>/feed.xml\n",
+            "\t```\n",
+            "</md-text>\n",
+            "\n",
+            "<p>sibling</p>\n",
+        );
+        let out = fmt(input);
+        assert_eq!(out, input, "got:\n{out}");
+        assert_eq!(fmt(&out), out, "must be idempotent");
+    }
+
+    #[test]
+    fn glued_fence_opener_alone_is_left_untouched() {
+        let input = "<div>\n\t<md-text type=\"code\">```ts\n\t\tconst x = 1\n\t\t```\n\t</md-text>\n</div>\n<p>after</p>\n";
+        assert_eq!(fmt(input), input);
+    }
+
+    #[test]
+    fn single_backtick_inline_code_still_scanned_normally() {
+        // A single backtick is inline code, not a fence opener (needs 3+); the
+        // surrounding tag's depth tracking must be unaffected.
+        let input = "<div>\n<p>`x` <foo> stays inline text</p>\n</div>\n";
+        let out = fmt(input);
+        assert!(out.contains("\t<p>`x` <foo> stays inline text</p>"), "got:\n{out}");
     }
 
     #[test]
