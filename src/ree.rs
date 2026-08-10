@@ -721,7 +721,8 @@ fn collapse_inter_tag(line: &str) -> String {
         // HTML tag `<…>` or `</…>` — copy verbatim (quotes handled by tag_end).
         if c == b'<' && i + 1 < n && (b[i + 1] == b'/' || b[i + 1].is_ascii_alphabetic()) {
             let end = tag_end(line, i);
-            out.push_str(&line[i..end]);
+            let tag = &line[i..end];
+            out.push_str(&collapse_tag_whitespace(tag));
             prev_is_close = b[end - 1] == b'>';
             i = end;
             continue;
@@ -757,6 +758,36 @@ fn collapse_inter_tag(line: &str) -> String {
         out.push_str(&line[i..i + l]);
         prev_is_close = false;
         i += l;
+    }
+    out
+}
+
+fn collapse_tag_whitespace(tag: &str) -> String {
+    let mut out = String::with_capacity(tag.len());
+    let mut quote = None;
+    let mut pending_space = false;
+    for c in tag.chars() {
+        if let Some(q) = quote {
+            out.push(c);
+            if c == q {
+                quote = None;
+            }
+        } else if c == '"' || c == '\'' {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+            quote = Some(c);
+        } else if c == ' ' || c == '\t' {
+            pending_space = true;
+        } else {
+            if pending_space && !out.ends_with('<') {
+                out.push(' ');
+            }
+            pending_space = false;
+            out.push(c);
+        }
     }
     out
 }
