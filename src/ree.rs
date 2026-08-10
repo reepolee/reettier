@@ -61,7 +61,10 @@ fn wrap_markup_lines(src: &str, width: usize) -> String {
     let mut out = String::new();
     for (line_index, line) in src.split('\n').enumerate() {
         if line_index > 0 { out.push('\n'); }
-        if line.len() <= width { out.push_str(line); continue; }
+        if line.len() <= width {
+            out.push_str(&split_short_tag_directive(line));
+            continue;
+        }
         let mut start = 0usize;
         let bytes = line.as_bytes();
         let mut quote = None;
@@ -75,9 +78,100 @@ fn wrap_markup_lines(src: &str, width: usize) -> String {
                 start = i;
             }
         }
-        out.push_str(line[start..].trim_start());
+        let remainder = line[start..].trim_start();
+        out.push_str(&wrap_opening_tag_attributes(remainder, width));
     }
     out
+}
+
+fn split_short_tag_directive(line: &str) -> String {
+    let Some(open) = line.find('<') else { return line.to_string(); };
+    let Some(close_rel) = find_opening_tag_end(&line[open..]) else { return line.to_string(); };
+    split_tag_following_directive(line, open + close_rel)
+}
+
+/// Break an oversized opening tag at attribute boundaries. The indentation
+/// pass below already knows how to indent a tag whose closing `>` is on a later
+/// line, so this only creates the structural line breaks.
+fn wrap_opening_tag_attributes(line: &str, _width: usize) -> String {
+    let Some(open) = line.find('<') else { return line.to_string(); };
+    if line.as_bytes().get(open + 1).is_some_and(|b| *b == b'/') { return line.to_string(); }
+    let Some(close_rel) = find_opening_tag_end(&line[open..]) else { return line.to_string(); };
+    let close = open + close_rel;
+    let directive_split = split_tag_following_directive(line, close);
+    if directive_split != line {
+        return directive_split;
+    }
+    let tag = &line[open..=close];
+    let name_end = tag[1..].find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
+        .map(|p| p + 1).unwrap_or(tag.len() - 1);
+    let name = &tag[..name_end];
+    let mut rest = tag[name_end..tag.len() - 1].trim();
+    let self_closing = rest.ends_with('/');
+    if self_closing { rest = rest[..rest.len() - 1].trim_end(); }
+    if rest.is_empty() {
+        return split_tag_following_directive(line, close);
+    }
+
+    let mut parts = Vec::new();
+    let mut part_start = 0usize;
+    let mut quote = None;
+    let mut brace_depth = 0usize;
+    for (i, ch) in rest.char_indices() {
+        if quote == Some(ch) { quote = None; continue; }
+        if quote.is_none() && (ch == '"' || ch == '\'') { quote = Some(ch); continue; }
+        if quote.is_none() && ch == '{' { brace_depth += 1; continue; }
+        if quote.is_none() && ch == '}' { brace_depth = brace_depth.saturating_sub(1); continue; }
+        if quote.is_none() && brace_depth == 0 && ch.is_ascii_whitespace() {
+            let part = rest[part_start..i].trim();
+            if !part.is_empty() { parts.push(part); }
+            part_start = i + ch.len_utf8();
+        }
+    }
+    let part = rest[part_start..].trim();
+    if !part.is_empty() { parts.push(part); }
+    if parts.len() < 2 {
+        return split_tag_following_directive(line, close);
+    }
+
+    let mut wrapped = String::new();
+    wrapped.push_str(&line[..open]);
+    wrapped.push_str(name);
+    for part in parts {
+        wrapped.push('\n');
+        wrapped.push_str(part);
+    }
+    wrapped.push('\n');
+    if self_closing { wrapped.push_str("/>"); } else { wrapped.push('>'); }
+    let suffix = &line[close + 1..];
+    if !suffix.trim().is_empty() { wrapped.push('\n'); }
+    wrapped.push_str(suffix);
+    wrapped
+}
+
+fn split_tag_following_directive(line: &str, close: usize) -> String {
+    let suffix = &line[close + 1..];
+    let Some(relative) = suffix.find("{#").or_else(|| suffix.find("{:")).or_else(|| suffix.find("{/")) else {
+        return line.to_string();
+    };
+    let split = close + 1 + relative;
+    if line[..split].trim().is_empty() || line[split..].trim().is_empty() {
+        return line.to_string();
+    }
+    format!("{}\n{}", &line[..split].trim_end(), &line[split..].trim_start())
+}
+
+fn find_opening_tag_end(src: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut brace_depth = 0usize;
+    for (i, ch) in src.char_indices().skip(1) {
+        if quote == Some(ch) { quote = None; continue; }
+        if quote.is_none() && (ch == '"' || ch == '\'') { quote = Some(ch); continue; }
+        if quote.is_none() && ch == '{' { brace_depth += 1; continue; }
+        if quote.is_none() && ch == '}' { brace_depth = brace_depth.saturating_sub(1); continue; }
+        if quote.is_none() && brace_depth == 0 && ch == '>' { return Some(i); }
+    }
+    None
 }
 
 // ── Block extraction / masking ───────────────────────────────────────────
