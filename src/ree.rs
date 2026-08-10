@@ -27,8 +27,13 @@ const VOID: &[&str] = &[
 /// Ree block directives that open a nesting level (matched by `{/kw}`).
 const REE_BLOCK_OPEN: &[&str] = &["if", "each", "with", "for"];
 
+#[allow(dead_code)]
 pub fn format_ree(src: &str, indent: &str) -> String {
-    let out = format_ree_inner(src, indent);
+    format_ree_with_options(src, indent, false, 100)
+}
+
+pub fn format_ree_with_options(src: &str, indent: &str, wrap_markup: bool, wrap_width: usize) -> String {
+    let out = format_ree_inner(src, indent, wrap_markup, wrap_width);
     if strip(src) == strip(&out) {
         out
     } else {
@@ -45,9 +50,34 @@ fn strip(s: &str) -> String {
         .collect()
 }
 
-fn format_ree_inner(src: &str, indent: &str) -> String {
+fn format_ree_inner(src: &str, indent: &str, wrap_markup: bool, wrap_width: usize) -> String {
     let (masked, blocks) = extract_blocks(src, indent);
-    indent_markup(&masked, indent, &blocks)
+    let wrapped = if wrap_markup { wrap_markup_lines(&masked, wrap_width) } else { masked };
+    indent_markup(&wrapped, indent, &blocks)
+}
+
+fn wrap_markup_lines(src: &str, width: usize) -> String {
+    if width == 0 { return src.to_string(); }
+    let mut out = String::new();
+    for (line_index, line) in src.split('\n').enumerate() {
+        if line_index > 0 { out.push('\n'); }
+        if line.len() <= width { out.push_str(line); continue; }
+        let mut start = 0usize;
+        let bytes = line.as_bytes();
+        let mut quote = None;
+        for i in 0..bytes.len() {
+            let ch = bytes[i] as char;
+            if quote == Some(ch) { quote = None; } else if quote.is_none() && (ch == '"' || ch == '\'') { quote = Some(ch); }
+            let is_opening_tag = ch == '<' && i + 1 < bytes.len() && bytes[i + 1] != b'/';
+            if quote.is_none() && is_opening_tag && i > start && line[start..i].trim().len() > 0 {
+                out.push_str(line[start..i].trim_end());
+                out.push('\n');
+                start = i;
+            }
+        }
+        out.push_str(line[start..].trim_start());
+    }
+    out
 }
 
 // ── Block extraction / masking ───────────────────────────────────────────

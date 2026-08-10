@@ -54,6 +54,12 @@ fn main() {
         hit
     };
 
+    let take_value = |args: &mut Vec<String>, name: &str| -> Option<String> {
+        let pos = args.iter().position(|a| a == name)?;
+        args.remove(pos);
+        if pos < args.len() { Some(args.remove(pos)) } else { None }
+    };
+
     if take(&mut args, &["--help", "-h"]) {
         print_help();
         return;
@@ -111,6 +117,8 @@ fn main() {
     }
 
     let full_mode = take(&mut args, &["--full"]);
+    let wrap_markup = take(&mut args, &["--wrap-markup"]);
+    let wrap_width = take_value(&mut args, "--wrap-width").unwrap_or_else(|| "100".to_string()).parse::<usize>().unwrap_or(100);
     let diff_mode = take(&mut args, &["--diff"]);
     let check_mode = take(&mut args, &["--check", "--dry-run", "-c"]);
     let verbose = take(&mut args, &["--verbose"]);
@@ -142,7 +150,7 @@ fn main() {
     });
 
     if let Some(ext) = stdin_ext {
-        run_stdin(&ext, &config, full_mode);
+        run_stdin(&ext, &config, full_mode, wrap_markup, wrap_width);
         return;
     }
 
@@ -170,7 +178,7 @@ fn main() {
     let start = std::time::Instant::now();
 
     files.par_iter().for_each(|file| {
-        match format_one(file, mode, &config, full_mode) {
+        match format_one(file, mode, &config, full_mode, wrap_markup, wrap_width) {
             Ok(true) => {
                 changed.fetch_add(1, Ordering::Relaxed);
             }
@@ -198,10 +206,10 @@ fn main() {
 }
 
 /// Format one file according to `mode`. Returns whether it changed (or would).
-fn format_one(path: &Path, mode: Mode, config: &Config, full: bool) -> Result<bool, String> {
+fn format_one(path: &Path, mode: Mode, config: &Config, full: bool, wrap_markup: bool, wrap_width: usize) -> Result<bool, String> {
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     let original = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let formatted = format::format_source_with(&original, ext, config, full);
+    let formatted = format::format_source_with(&original, ext, config, full, wrap_markup, wrap_width);
 
     if formatted == original {
         return Ok(false);
@@ -222,7 +230,7 @@ fn format_one(path: &Path, mode: Mode, config: &Config, full: bool) -> Result<bo
     Ok(true)
 }
 
-fn run_stdin(ext: &str, config: &Config, full: bool) {
+fn run_stdin(ext: &str, config: &Config, full: bool, wrap_markup: bool, wrap_width: usize) {
     let mut input = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut input) {
         eprintln!("Error reading stdin: {}", e);
@@ -233,7 +241,7 @@ fn run_stdin(ext: &str, config: &Config, full: bool) {
         print!("{}", input);
         return;
     }
-    print!("{}", format::format_source_with(&input, ext, config, full));
+    print!("{}", format::format_source_with(&input, ext, config, full, wrap_markup, wrap_width));
 }
 
 fn collect_targets(targets: &[String], config: &Config) -> Vec<PathBuf> {
@@ -322,6 +330,8 @@ fn print_help() {
     println!("OPTIONS:");
     println!("  --full                   Reprint: re-derive layout from the syntax tree");
     println!("                           (default is the layout-preserving indenter)");
+    println!("  --wrap-markup            Opt in to semantic .ree markup wrapping");
+    println!("  --wrap-width <n>         Width threshold for --wrap-markup (default: 100)");
     println!("  --check, -c, --dry-run   List files that would change (exit 1 if any)");
     println!("  --diff                   Show a unified diff without writing");
     println!("  --git                    Format only uncommitted (git-changed) files");

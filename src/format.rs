@@ -10,13 +10,13 @@ use crate::config::Config;
 /// kept as the stable entry point used by tests and any embedder.
 #[allow(dead_code)]
 pub fn format_source(content: &str, ext: &str, config: &Config) -> String {
-    format_source_with(content, ext, config, false)
+    format_source_with(content, ext, config, false, false, 100)
 }
 
 /// Format `content`. When `full` is true, use the Reprinter (`--full`): discard
 /// the author's line breaks and re-derive layout from the syntax tree. When
 /// false (default), use the layout-preserving Indenter.
-pub fn format_source_with(content: &str, ext: &str, config: &Config, full: bool) -> String {
+pub fn format_source_with(content: &str, ext: &str, config: &Config, full: bool, wrap_markup: bool, wrap_width: usize) -> String {
     // CRLF handling is centralized here — the single choke point every language
     // path flows through — so no inner engine (ts/js/css/ree) ever sees `\r`.
     // The markup path splits on `'\n'` and keeps a trailing `\r`, while embedded
@@ -48,7 +48,7 @@ pub fn format_source_with(content: &str, ext: &str, config: &Config, full: bool)
         match ext {
             "ts" | "js" => format_js(lf, config),
             "css" => format_css(lf, config),
-            "ree" => format_ree(lf, config),
+            "ree" => crate::ree::format_ree_with_options(lf, &config.indent, wrap_markup, wrap_width),
             _ => unreachable!("ext filtered above"),
         }
     };
@@ -66,10 +66,6 @@ fn format_js(content: &str, config: &Config) -> String {
 
 fn format_css(content: &str, config: &Config) -> String {
     crate::engine::format_css(content, &config.indent)
-}
-
-fn format_ree(content: &str, config: &Config) -> String {
-    crate::ree::format_ree(content, &config.indent)
 }
 
 #[cfg(test)]
