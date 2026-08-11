@@ -372,6 +372,7 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
     let mut in_tag = false;
     let mut tag_base = 0usize;
     let mut tag_opener = false;
+    let mut previous_line_closed_html = false;
 
     let lines: Vec<&str> = masked.split('\n').collect();
     for (li, raw) in lines.iter().enumerate() {
@@ -409,7 +410,16 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
             // broken-tag attribute continuations in the `in_tag` branch, which
             // have no structural signal of their own.)
             let line_level = (depth - leading_closers as i32).max(0) as usize;
-            let level = line_level;
+            let closes_outer_ree_element = trimmed.starts_with("</div")
+                && lines.get(li + 1).is_some_and(|next| next.trim() == "{/with}");
+            let level = if (previous_line_closed_html && trimmed.starts_with("{/"))
+                || closes_outer_ree_element
+                && author < line_level
+            {
+                author
+            } else {
+                line_level
+            };
             let base = indent.repeat(level);
 
             if trailing.is_empty() || pending.is_some() {
@@ -436,6 +446,8 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
                 }
             }
         }
+
+        previous_line_closed_html = trimmed.starts_with("</") && trimmed.ends_with('>');
 
         if li + 1 < lines.len() {
             out.push('\n');
@@ -1173,6 +1185,20 @@ mod tests {
     fn ree_block_directives_indent() {
         let input = "{#if show}\n<div>x</div>\n{/if}\n";
         assert_eq!(fmt(input), "{#if show}\n\t<div>x</div>\n{/if}\n");
+    }
+
+    #[test]
+    fn ree_with_closer_dedents_after_outer_element_and_script() {
+        let input = "{#with props}\n\t<div>\n\t\t<script src=\"/studio.js\"></script>\n\t</div>\n{/with}\n";
+        let expected = "{#with props}\n\t<div>\n\t\t<script src=\"/studio.js\"></script>\n\t</div>\n{/with}\n";
+        assert_eq!(fmt(input), expected);
+    }
+
+    #[test]
+    fn full_studio_fixture_with_closer_returns_to_column_zero() {
+        let source = include_str!("../test-files/index.ree");
+        let output = fmt(source);
+        assert!(output.ends_with("\n\t</div>\n{/with}\n"), "unexpected fixture tail:\n{}", output.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
 
     #[test]
