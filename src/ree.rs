@@ -372,7 +372,6 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
     let mut in_tag = false;
     let mut tag_base = 0usize;
     let mut tag_opener = false;
-    let mut previous_line_closed_html = false;
 
     let lines: Vec<&str> = masked.split('\n').collect();
     for (li, raw) in lines.iter().enumerate() {
@@ -410,16 +409,7 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
             // broken-tag attribute continuations in the `in_tag` branch, which
             // have no structural signal of their own.)
             let line_level = (depth - leading_closers as i32).max(0) as usize;
-            let closes_outer_ree_element = trimmed.starts_with("</div")
-                && lines.get(li + 1).is_some_and(|next| next.trim() == "{/with}");
-            let level = if (previous_line_closed_html && trimmed.starts_with("{/"))
-                || closes_outer_ree_element
-                && author < line_level
-            {
-                author
-            } else {
-                line_level
-            };
+            let level = line_level;
             let base = indent.repeat(level);
 
             if trailing.is_empty() || pending.is_some() {
@@ -446,8 +436,6 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
                 }
             }
         }
-
-        previous_line_closed_html = trimmed.starts_with("</") && trimmed.ends_with('>');
 
         if li + 1 < lines.len() {
             out.push('\n');
@@ -1185,6 +1173,43 @@ mod tests {
     fn ree_block_directives_indent() {
         let input = "{#if show}\n<div>x</div>\n{/if}\n";
         assert_eq!(fmt(input), "{#if show}\n\t<div>x</div>\n{/if}\n");
+    }
+
+    #[test]
+    fn ree_closer_after_html_closer_dedents_structurally() {
+        // A Ree block closer ({/if}) that directly follows an HTML closer
+        // (</div>) must dedent to its structural level, not preserve the
+        // author's over-indentation. (Regression: a "previous line closed
+        // HTML" special case used to keep such closers at the author's indent.)
+        let input = concat!(
+            "{#if show_scope}\n",
+            "\t\t\t\t\t{#if global_scopes && global_scopes.length > 1 }\n",
+            "\t\t\t\t\t\t<div class=\"x\">\n",
+            "\t\t\t\t\t\t\t{= n }\n",
+            "\t\t\t\t\t\t</div>\n",
+            "\t{/if}\n",
+            "\t\t\t\t\t{#if global_scopes && global_scopes.length === 1 }\n",
+            "\t\t\t\t\t\t<div class=\"y\">\n",
+            "\t\t\t\t\t\t\t{= n }\n",
+            "\t\t\t\t\t\t</div>\n",
+            "\t\t\t\t{/if}\n",
+            "{/if}\n",
+        );
+        let expected = concat!(
+            "{#if show_scope}\n",
+            "\t{#if global_scopes && global_scopes.length > 1 }\n",
+            "\t\t<div class=\"x\">\n",
+            "\t\t\t{= n }\n",
+            "\t\t</div>\n",
+            "\t{/if}\n",
+            "\t{#if global_scopes && global_scopes.length === 1 }\n",
+            "\t\t<div class=\"y\">\n",
+            "\t\t\t{= n }\n",
+            "\t\t</div>\n",
+            "\t{/if}\n",
+            "{/if}\n",
+        );
+        assert_eq!(fmt(input), expected);
     }
 
     #[test]
