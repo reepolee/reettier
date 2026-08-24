@@ -33,8 +33,80 @@ pub(crate) fn flatten_concat(src: &str) -> String {
 /// Format full Ree template content.
 pub(crate) fn format_ree_content(content: &str, wrap_width: usize, oneline: usize, collapse: crate::full::format::CollapseConfig, remove_unused: bool) -> String {
     let ast_output = crate::full::ree_parser::format_ree(content, wrap_width, oneline);
-    let after_raw_js = format_raw_js_blocks(&ast_output, wrap_width, collapse.clone(), remove_unused);
+    let after_exprs = format_directive_exprs(&ast_output, remove_unused);
+    let after_raw_js = format_raw_js_blocks(&after_exprs, wrap_width, collapse.clone(), remove_unused);
     format_script_blocks(&after_raw_js, wrap_width, collapse, remove_unused)
+}
+
+/// A Ree directive body (`{#case …}`, `{#switch …}`) is worth formatting when
+/// it is more than a plain literal or identifier path — i.e. it contains any
+/// operator, call, subscript, comma, or ternary punctuation. Simple bodies
+/// (`10`, `"admin"`, `props.status`) are left byte-for-byte alone so SWC can't
+/// rewrite the author's quoting.
+fn is_complex_expr(expr: &str) -> bool {
+    expr.trim().chars().any(|c| {
+        matches!(
+            c,
+            '(' | '[' | ',' | '=' | '!' | '&' | '|' | '+' | '-' | '*' | '/' | '%' | '>' | '<' | '?' | '~' | '^'
+        )
+    })
+}
+
+/// Clean up SWC's output for use inside a single-line Ree directive: drop the
+/// trailing `;` codegen appends to an expression statement, and collapse any
+/// line wrapping back onto one line.
+fn clean_formatted_expr(formatted: &str) -> String {
+    let mut s = formatted.trim().to_string();
+    if s.ends_with(';') {
+        s.pop();
+    }
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Run the bodies of `{#case …}` and `{#switch …}` directives through the SWC
+/// JS pipeline when they contain a complex expression; simple ones pass through
+/// untouched. `prefix` is the full directive opener including the brace and
+/// sigil; the body is whatever follows it up to the matching `}`.
+fn format_directive_exprs(content: &str, remove_unused: bool) -> String {
+    const PREFIXES: [&str; 2] = ["{#case", "{#switch"];
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(content.len());
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'{' {
+            if let Some(prefix) = PREFIXES.iter().find(|p| content[i..].starts_with(**p)) {
+                let after = content[i + prefix.len()..].chars().next();
+                if matches!(after, Some(' ') | Some('\t') | Some('}')) {
+                    if let Some(end) = find_matching_brace(content, i) {
+                        let inner = &content[i + 1..end];
+                        let body = inner.trim_start().strip_prefix(&prefix[1..]).unwrap_or(inner);
+                        let expr = body.trim();
+                        let replacement = if !expr.is_empty() && is_complex_expr(expr) {
+                            let cleaned = clean_formatted_expr(&format_js_fragment(expr, remove_unused));
+                            if cleaned.is_empty() {
+                                None
+                            } else {
+                                Some(format!("{{{} {}}}", &prefix[1..], cleaned))
+                            }
+                        } else {
+                            None
+                        };
+                        match replacement {
+                            Some(r) => out.push_str(&r),
+                            None => out.push_str(&content[i..=end]),
+                        }
+                        i = end + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        let ch = content[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 fn format_script_blocks(content: &str, wrap_width: usize, collapse: crate::full::format::CollapseConfig, remove_unused: bool) -> String {
@@ -199,7 +271,7 @@ fn format_style_content(content: &str, wrap_width: usize, collapse: crate::full:
 enum ReeCtrl {
     /// Block opener: `{#if …}`, `{#each …}`, `{#with …}` — increases nesting.
     Open,
-    /// Block clause: `{:else}`, `{:else if …}` — sits at the opener's level.
+    /// Block clause: `{:else}` — sits at the opener's level.
     Mid,
     /// Block closer: `{/if}`, `{/each}`, `{/with}` — decreases nesting.
     Close,
@@ -225,7 +297,8 @@ fn classify_ree_control(trimmed: &str) -> Option<ReeCtrl> {
         return matches!(kw, "if" | "each" | "with").then_some(ReeCtrl::Open);
     }
     if let Some(rest) = inner.strip_prefix(':') {
-        return rest.trim_start().starts_with("else").then_some(ReeCtrl::Mid);
+        // The engine supports only a bare `{:else}` — no `{:else if …}`.
+        return (rest.trim_start() == "else").then_some(ReeCtrl::Mid);
     }
     if let Some(rest) = inner.strip_prefix('/') {
         return matches!(rest.trim(), "if" | "each" | "with").then_some(ReeCtrl::Close);
@@ -611,7 +684,7 @@ mod tests {
         assert!(matches!(classify_ree_control("{#each items as i}"), Some(ReeCtrl::Open)));
         assert!(matches!(classify_ree_control("{#with props}"), Some(ReeCtrl::Open)));
         assert!(matches!(classify_ree_control("{:else}"), Some(ReeCtrl::Mid)));
-        assert!(matches!(classify_ree_control("{:else if y}"), Some(ReeCtrl::Mid)));
+        assert!(classify_ree_control("{:else if y}").is_none(), "there is no {{:else if}} in .ree templates");
         assert!(matches!(classify_ree_control("{/if}"), Some(ReeCtrl::Close)));
     }
 
@@ -740,6 +813,74 @@ mod tests {
         // Idempotent
         let pass2 = format_ree_content(&result, 120, 0, CollapseConfig::uniform(true, 3), false);
         assert_eq!(result, pass2, "{{}} block formatting should be idempotent");
+    }
+
+    #[test]
+    fn case_expr_complex_is_js_formatted() {
+        // A comparison chain in a {#case} label gets SWC spacing.
+        let src = "{#switch x }\n{#case props.status===10&&active}\n<p>y</p>\n{/switch}\n";
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        assert!(
+            out.contains("{#case props.status === 10 && active}"),
+            "complex case expr should be formatted:\n{out}"
+        );
+        assert!(!out.contains(";}"), "no injected semicolon inside the directive:\n{out}");
+        // Idempotent.
+        let out2 = format_ree_content(&out, 120, 0, cfg(), false);
+        assert_eq!(out, out2, "formatted case expr should be idempotent");
+    }
+
+    #[test]
+    fn case_expr_simple_is_untouched() {
+        // Simple literals and identifier paths stay byte-for-byte, so SWC never
+        // rewrites the author's quoting on single-quoted strings.
+        let src = concat!(
+            "{#switch x }\n",
+            "{#case 10}\n",
+            "<p>ten</p>\n",
+            "{#case 'admin'}\n",
+            "<p>admin</p>\n",
+            "{#case props.status}\n",
+            "<p>s</p>\n",
+            "{/switch}\n",
+        );
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        assert!(out.contains("{#case 10}\n"), "number literal untouched:\n{out}");
+        assert!(out.contains("{#case 'admin'}\n"), "single-quoted string untouched:\n{out}");
+        assert!(out.contains("{#case props.status}\n"), "member path untouched:\n{out}");
+        let out2 = format_ree_content(&out, 120, 0, cfg(), false);
+        assert_eq!(out, out2, "simple case exprs should be idempotent");
+    }
+
+    #[test]
+    fn switch_expr_complex_is_formatted() {
+        let src = "{#switch props.a===1?x:y}\n{#case 1}\n<p>one</p>\n{/switch}\n";
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        assert!(
+            out.contains("{#switch props.a === 1 ? x : y}\n"),
+            "complex switch expr formatted:\n{out}"
+        );
+        let out2 = format_ree_content(&out, 120, 0, cfg(), false);
+        assert_eq!(out, out2, "switch expr should be idempotent");
+    }
+
+    #[test]
+    fn switch_expr_simple_untouched() {
+        let src = "{#switch props.status}\n{#case 1}\n<p>one</p>\n{/switch}\n";
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        assert!(out.contains("{#switch props.status}\n"), "member path untouched:\n{out}");
+    }
+
+    #[test]
+    fn case_expr_call_and_nested_braces() {
+        // A call with an object literal argument — nested braces must not
+        // confuse the matching-`}` scan, and the result stays on one line.
+        let src = "{#switch x }\n{#case resolve(props.record,{a:1,b:2})>5}\n<p>y</p>\n{/switch}\n";
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        assert!(
+            out.contains("{#case resolve(props.record, { a: 1, b: 2 }) > 5}"),
+            "call with object literal formatted:\n{out}"
+        );
     }
 
     #[test]

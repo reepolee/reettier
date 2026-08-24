@@ -32,6 +32,15 @@ pub(crate) enum Node {
         /// True if the source had {#keyword} and {/keyword} on the same line.
         inline: bool,
     },
+    /// `{#switch expr}` with its arms — each `{#case …}` / `{:else}` label plus
+    /// the body under it. Labels print one level under the switch, bodies one
+    /// level under their label; `{/switch}` returns to the switch's level.
+    ReeSwitch {
+        expr: String,
+        arms: Vec<ReeArm>,
+        /// True if the source had {#switch} and {/switch} on the same line.
+        inline: bool,
+    },
     ReeExpr(String),
     ReeCall(String),
     /// `{_ expr}` — trimmed text.
@@ -41,6 +50,13 @@ pub(crate) enum Node {
     ReeDirective(String),
     Comment(String),
     RawJs(String),
+}
+
+/// One arm of a `{#switch}`: a `{#case expr}` or `{:else}` label plus its body.
+#[derive(Debug, Clone)]
+pub(crate) struct ReeArm {
+    pub(crate) label: String,
+    pub(crate) children: Vec<Node>,
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -72,6 +88,9 @@ enum Stop {
     /// children of the element.
     CloseTag(String, Option<String>),
     ReeClose(String),
+    /// Inside a {#switch}: stop at the next {#case} / {:else} / {/switch}
+    /// marker so arm boundaries are never swallowed by body content.
+    ReeSwitchBoundary,
 }
 
 /// Extract the Ree block keyword from a Stop condition, if any.
@@ -81,6 +100,9 @@ fn ree_keyword_from_stop(stop: &Stop) -> Option<String> {
     match stop {
         Stop::ReeClose(kw) => Some(kw.clone()),
         Stop::CloseTag(_, kw) => kw.clone(),
+        // Thread "switch" so elements nested in an arm also stop at
+        // {#case}/{:else}/{/switch} markers via check_stop.
+        Stop::ReeSwitchBoundary => Some("switch".to_string()),
         Stop::None => None,
     }
 }
@@ -123,10 +145,11 @@ fn parse_nodes(input: &str, stop: Stop) -> (Vec<Node>, &str) {
     (nodes, remaining)
 }
 
-/// Check if a string starts with a Ree else marker: {:else}, {:else }, {:else if ...}
+/// Check if a string starts with a Ree else marker: `{:else}` or `{:else }`.
+/// There is no `{:else if …}` in .ree templates.
 fn is_ree_else_marker(s: &str) -> bool {
     if let Some(rest) = s.strip_prefix("{:else") {
-        rest.starts_with('}') || rest.starts_with(" }") || rest.starts_with(" if") || rest.starts_with("\tif")
+        rest.starts_with('}') || rest.starts_with(" }")
     } else {
         false
     }
@@ -149,6 +172,11 @@ fn is_ree_close_tag(input: &str, keyword: &str) -> bool {
 fn check_stop(remaining: &str, stop: &Stop) -> bool {
     match stop {
         Stop::None => false,
+        Stop::ReeSwitchBoundary => {
+            is_ree_case_marker(remaining)
+                || is_ree_else_marker(remaining)
+                || is_ree_close_tag(remaining, "switch")
+        }
         Stop::CloseTag(tag, ree_keyword) => {
             // Check for closing </tag>
             if let Some(after) = remaining.strip_prefix("</") {
@@ -162,15 +190,30 @@ fn check_stop(remaining: &str, stop: &Stop) -> bool {
             // Also stop at Ree block markers when nested inside a Ree block.
             // Otherwise {:else} and {/if} get consumed as children of this element.
             if let Some(ref kw) = ree_keyword {
-                if is_ree_close_tag(remaining, kw) || is_ree_else_marker(remaining) {
+                if is_ree_close_tag(remaining, kw)
+                    || is_ree_else_marker(remaining)
+                    || is_ree_case_marker(remaining)
+                {
                     return true;
                 }
             }
             false
         }
         Stop::ReeClose(keyword) => {
-            is_ree_close_tag(remaining, &keyword) || is_ree_else_marker(remaining)
+            is_ree_close_tag(remaining, &keyword)
+                || is_ree_else_marker(remaining)
+                || is_ree_case_marker(remaining)
         }
+    }
+}
+
+/// Check if a string starts with a Ree switch-arm marker: `{#case` followed by
+/// whitespace or `}` (so `{#casesomething}` is not misread as a marker).
+fn is_ree_case_marker(s: &str) -> bool {
+    if let Some(rest) = s.strip_prefix("{#case") {
+        rest.starts_with('}') || rest.starts_with(' ') || rest.starts_with('\t')
+    } else {
+        false
     }
 }
 
@@ -262,6 +305,13 @@ fn parse_token<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<Node
         }
     } else if input.starts_with('<') {
         parse_html_tag(input, ree_keyword)
+    } else if input.starts_with("{#switch")
+        && matches!(
+            input.as_bytes().get(8),
+            Some(b' ') | Some(b'\t') | Some(b'}')
+        )
+    {
+        parse_ree_switch(input)
     } else if input.starts_with("{#if")
         || input.starts_with("{#each")
         || input.starts_with("{#with")
@@ -269,7 +319,11 @@ fn parse_token<'a>(input: &'a str, ree_keyword: &Option<String>) -> (Option<Node
         parse_ree_block_open(input)
     } else if input.starts_with("{#layout") || input.starts_with("{#include") {
         parse_ree_directive(input)
-    } else if input.starts_with("{/if") || input.starts_with("{/each") || input.starts_with("{/with") {
+    } else if input.starts_with("{/if")
+        || input.starts_with("{/each")
+        || input.starts_with("{/with")
+        || input.starts_with("{/switch")
+    {
         parse_ree_block_close(input)
     } else if input.starts_with("{:else") {
         let end = find_brace_end(input);
@@ -564,20 +618,77 @@ fn parse_ree_block_open(input: &str) -> (Option<Node>, &str) {
     (Some(Node::ReeBlock { keyword, expr, children, else_children, inline }), remaining)
 }
 
+/// Parse `{#switch expr}` … `{/switch}` into arms: each `{#case …}` / `{:else}`
+/// label collects the nodes that follow it until the next marker or the close.
+fn parse_ree_switch(input: &str) -> (Option<Node>, &str) {
+    let end = find_brace_end(input);
+    if end == 0 {
+        return (Some(Node::Text(input[..1].to_string())), &input[1..]);
+    }
+    let directive = input[1..end - 1].trim();
+    let expr = directive
+        .strip_prefix('#')
+        .unwrap_or(directive)
+        .trim_start()
+        .strip_prefix("switch")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let remaining = &input[end..];
+
+    // Detect inline: {/switch} appears before the first newline after the open.
+    let newline_pos = remaining.find('\n').unwrap_or(remaining.len());
+    let close_pos = remaining.find("{/switch").unwrap_or(remaining.len());
+    let inline = close_pos < newline_pos;
+
+    let mut rest = remaining;
+    let mut arms: Vec<ReeArm> = Vec::new();
+    let mut pending_label: Option<String> = None;
+
+    loop {
+        let (segment, after) = parse_nodes(rest, Stop::ReeSwitchBoundary);
+        if let Some((label, after2)) = take_arm_label(after) {
+            // `segment` is the body of the arm whose label we last saw.
+            if let Some(prev) = pending_label.replace(label) {
+                arms.push(ReeArm { label: prev, children: segment });
+            }
+            // (Content before the very first arm label is dropped — a
+            // well-formed switch starts with a case.)
+            rest = after2;
+            continue;
+        }
+        // No more arm markers: `segment` closes out the pending arm (or is the
+        // whole body when the switch has no {#case} arms at all).
+        if let Some(prev) = pending_label {
+            arms.push(ReeArm { label: prev, children: segment });
+        } else if !segment.is_empty() {
+            arms.push(ReeArm { label: String::new(), children: segment });
+        }
+        rest = after;
+        break;
+    }
+
+    let rest = skip_ree_close(rest, "switch");
+    (Some(Node::ReeSwitch { expr, arms, inline }), rest)
+}
+
+/// If `input` starts at a switch-arm label (`{#case …}` / `{:else}`), return
+/// the trimmed label text and the remainder after its closing `}`.
+fn take_arm_label(input: &str) -> Option<(String, &str)> {
+    if is_ree_case_marker(input) || is_ree_else_marker(input) {
+        let end = find_brace_end(input);
+        if end > 0 {
+            return Some((input[..end].trim().to_string(), &input[end..]));
+        }
+    }
+    None
+}
+
 fn parse_else_branch<'a>(input: &'a str, keyword: &str) -> (Option<Vec<Node>>, &'a str) {
     let trimmed = input.trim_start();
     let offset = input.len() - trimmed.len();
 
-    // Handle {:else if ...} with optional space before }
-    if trimmed.starts_with("{:else if ") || trimmed.starts_with("{:else if\t") {
-        if let Some(end) = trimmed.find('}') {
-            let rem = &input[offset + end + 1..];
-            let stop = Stop::ReeClose(keyword.to_string());
-            let (children, rem) = parse_nodes(rem, stop);
-            return (Some(children), rem);
-        }
     // Handle {:else} and {:else } — both are valid else markers
-    } else if let Some(rest) = trimmed.strip_prefix("{:else") {
+    if let Some(rest) = trimmed.strip_prefix("{:else") {
         if rest.starts_with('}') || rest.starts_with(" }") {
             // Find the actual closing brace
             if let Some(end) = trimmed.find('}') {
@@ -699,11 +810,17 @@ fn parse_raw_block_content<'a>(input: &'a str, close_marker: &str) -> (Vec<Node>
         // Parse Ree blocks ({#if}/{#each}/{#with}) inside script/style so their
         // structure is preserved; the JS between the tokens is formatted later.
         // Leave {=}, {~}, {_}, {-} as raw Text — they're handled by SWC post-processing.
-        if remaining.starts_with("{#if") || remaining.starts_with("{#each") || remaining.starts_with("{#with") {
+        if remaining.starts_with("{#switch")
+            && matches!(remaining.as_bytes().get(8), Some(b' ') | Some(b'\t') | Some(b'}'))
+        {
+            let (node, after) = parse_ree_switch(remaining);
+            if let Some(n) = node { nodes.push(n); }
+            remaining = after;
+        } else if remaining.starts_with("{#if") || remaining.starts_with("{#each") || remaining.starts_with("{#with") {
             let (node, after) = parse_ree_block_open(remaining);
             if let Some(n) = node { nodes.push(n); }
             remaining = after;
-        } else if remaining.starts_with("{:else") || remaining.starts_with(            "{{/if}}") || remaining.starts_with("{/each}") || remaining.starts_with("{/with}") {
+        } else if remaining.starts_with("{:else") || remaining.starts_with(            "{{/if}}") || remaining.starts_with("{/each}") || remaining.starts_with("{/with}") || remaining.starts_with("{/switch}") {
             // Pass through close/else tokens — they're part of Ree blocks
             let end = find_brace_end(remaining);
             if end > 0 {
@@ -864,6 +981,38 @@ fn print_node(node: &Node, depth: usize, out: &mut String, wrap_width: usize, on
                 out.push('\n');
             }
         }
+        Node::ReeSwitch { expr, arms, inline } => {
+            let open = if expr.is_empty() {
+                "{#switch}".to_string()
+            } else {
+                format!("{{#switch {}}}", expr)
+            };
+            if *inline {
+                let mut s = open;
+                for arm in arms {
+                    s.push_str(&arm.label);
+                    let content: String = arm.children.iter().map(render_node_inline).collect();
+                    s.push_str(content.trim());
+                }
+                s.push_str("{/switch}");
+                out.push_str(&"\t".repeat(depth));
+                out.push_str(&s);
+                out.push('\n');
+            } else {
+                out.push_str(&"\t".repeat(depth));
+                out.push_str(&open);
+                out.push('\n');
+                for arm in arms {
+                    out.push_str(&"\t".repeat(depth + 1));
+                    out.push_str(&arm.label);
+                    out.push('\n');
+                    print_ree_block_children(&arm.children, depth + 2, out, wrap_width, oneline);
+                }
+                out.push_str(&"\t".repeat(depth));
+                out.push_str("{/switch}");
+                out.push('\n');
+            }
+        }
         Node::ReeExpr(expr) => {
             out.push_str(&"\t".repeat(depth));
             out.push_str(&format!("{{= {}}}", expr));
@@ -959,6 +1108,21 @@ fn render_node_inline(node: &Node) -> String {
             result.push_str(&format!("{{/{}}}", keyword));
             result
         }
+        Node::ReeSwitch { expr, arms, .. } => {
+            let open = if expr.is_empty() {
+                "{#switch}".to_string()
+            } else {
+                format!("{{#switch {}}}", expr)
+            };
+            let mut result = open;
+            for arm in arms {
+                result.push_str(&arm.label);
+                let content: String = arm.children.iter().map(render_node_inline).collect();
+                result.push_str(content.trim());
+            }
+            result.push_str("{/switch}");
+            result
+        }
         Node::RawJs(_) => String::new(),
     }
 }
@@ -1007,7 +1171,7 @@ fn all_children_are_whitespace(children: &[Node]) -> bool {
 }
 
 fn has_no_child_elements(children: &[Node]) -> bool {
-    children.iter().all(|c| !matches!(c, Node::Element { .. } | Node::ReeBlock { .. }))
+    children.iter().all(|c| !matches!(c, Node::Element { .. } | Node::ReeBlock { .. } | Node::ReeSwitch { .. }))
 }
 
 fn format_attrs_inline(attrs: &[String]) -> String {
@@ -1398,6 +1562,79 @@ mod tests {
         );
         let pass2 = format_ree(&output, 120, 0);
         assert_eq!(output, pass2, "multi-line ReeBlock should be idempotent");
+    }
+
+    #[test]
+    fn ree_switch_multiline() {
+        // {#switch}/{#case} arms: labels one level under the switch, bodies
+        // one level under their label, close back at the switch's level.
+        let input = concat!(
+            "{#switch x }\n",
+            "{#case 10}\n",
+            "<h1>Its 10</h1>\n",
+            "{#case 100}\n",
+            "<h1>Its 100</h1>\n",
+            "{:else}\n",
+            "<h1>Something else</h1>\n",
+            "{/switch}\n",
+        );
+        let expected = concat!(
+            "{#switch x}\n",
+            "\t{#case 10}\n",
+            "\t\t<h1>Its 10</h1>\n",
+            "\t{#case 100}\n",
+            "\t\t<h1>Its 100</h1>\n",
+            "\t{:else}\n",
+            "\t\t<h1>Something else</h1>\n",
+            "{/switch}\n",
+        );
+        let output = format_ree(input, 120, 0);
+        assert_eq!(output, expected, "got:\n{}", output);
+        let pass2 = format_ree(&output, 120, 0);
+        assert_eq!(output, pass2, "multi-line ReeSwitch should be idempotent");
+    }
+
+    #[test]
+    fn ree_switch_inline_stays_inline() {
+        // Source has {#switch} and {/switch} on the same line → inline.
+        let input = "{#switch x }{#case 1}{= a }{/switch}";
+        let output = format_ree(input, 120, 0);
+        assert_eq!(output, "{#switch x}{#case 1}{= a}{/switch}\n");
+        let pass2 = format_ree(&output, 120, 0);
+        assert_eq!(output, pass2, "inline ReeSwitch should be idempotent");
+    }
+
+    #[test]
+    fn ree_switch_nested_in_markup_and_blocks() {
+        // The switch inside a <div>, with an {#if} nested in an arm body.
+        let input = concat!(
+            "<div>\n",
+            "{#switch x }\n",
+            "{#case 10}\n",
+            "{#if a}\n",
+            "<p>yes</p>\n",
+            "{/if}\n",
+            "{#case 100}\n",
+            "<p>hundred</p>\n",
+            "{/switch}\n",
+            "</div>\n",
+        );
+        let expected = concat!(
+            "<div>\n",
+            "\t{#switch x}\n",
+            "\t\t{#case 10}\n",
+            "\t\t\t{#if a}\n",
+            "\t\t\t\t<p>yes</p>\n",
+            "\t\t\t{/if}\n",
+            "\t\t{#case 100}\n",
+            "\t\t\t<p>hundred</p>\n",
+            "\t{/switch}\n",
+            "</div>\n",
+        );
+        let output = format_ree(input, 120, 0);
+        assert_eq!(output, expected, "got:\n{}", output);
+        let pass2 = format_ree(&output, 120, 0);
+        assert_eq!(output, pass2, "nested ReeSwitch should be idempotent");
     }
 
     #[test]

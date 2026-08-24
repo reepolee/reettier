@@ -25,7 +25,10 @@ const VOID: &[&str] = &[
 ];
 
 /// Ree block directives that open a nesting level (matched by `{/kw}`).
-const REE_BLOCK_OPEN: &[&str] = &["if", "each", "with", "for"];
+/// `{#switch}` is special-cased in `analyze_line` to open **two** levels (the
+/// switch itself plus the current arm's body); listing it here too lets the
+/// trailing-closer matcher treat it as a same-line opener.
+const REE_BLOCK_OPEN: &[&str] = &["if", "each", "with", "for", "switch"];
 
 #[allow(dead_code)]
 pub fn format_ree(src: &str, indent: &str) -> String {
@@ -423,16 +426,18 @@ fn indent_markup(masked: &str, indent: &str, blocks: &[Block]) -> String {
                 }
             } else {
                 // Render the content head, then peel each trailing block-closer
-                // onto its own line, dedenting one level per closer relative to
-                // the head's rendered level.
+                // onto its own line, dedenting per closer relative to the head's
+                // rendered level ({/switch} closes two levels).
                 render_line(&mut out, head, &base, indent, blocks);
                 depth = (depth + opens as i32 - closes as i32).max(0);
-                for (k, closer) in trailing.iter().enumerate() {
-                    let closer_level = level.saturating_sub(1 + k);
-                    let cbase = indent.repeat(closer_level);
+                let mut peeled: usize = 0;
+                for closer in trailing.iter() {
+                    let dedent = closer_dedent(closer);
+                    peeled += dedent;
+                    let cbase = indent.repeat(level.saturating_sub(peeled));
                     out.push('\n');
                     render_line(&mut out, closer, &cbase, indent, blocks);
-                    depth = (depth - 1).max(0);
+                    depth = (depth - dedent as i32).max(0);
                 }
             }
         }
@@ -537,23 +542,39 @@ fn analyze_line(line: &str) -> (usize, usize, usize, Option<bool>) {
             match b[i + 1] {
                 b'#' => {
                     let kw = ree_keyword(&line[i..]);
-                    if REE_BLOCK_OPEN.contains(&kw.as_str()) {
+                    if kw == "switch" {
+                        // {#switch} opens two levels: the switch block itself
+                        // and the current arm's body. Arm labels ({#case}/{:else})
+                        // sit one level under the body; {/switch} closes both.
+                        opens += 2;
+                        seen_opener = true;
+                    } else if REE_BLOCK_OPEN.contains(&kw.as_str()) {
                         opens += 1;
                         seen_opener = true;
+                    } else if kw == "case" {
+                        // {#case …} is a switch-arm label, like {:else}: the
+                        // line dedents one level (back to the arm-label column)
+                        // and contributes nothing to depth — the arm body stays
+                        // nested one level deeper.
+                        if !seen_opener {
+                            leading_closers += 1;
+                        }
                     }
                     i = brace_end(line, i);
                     continue;
                 }
                 b'/' => {
-                    closes += 1;
+                    let kw = ree_keyword(&line[i..]);
+                    let levels = if kw == "switch" { 2 } else { 1 };
+                    closes += levels;
                     if !seen_opener {
-                        leading_closers += 1;
+                        leading_closers += levels;
                     }
                     i = brace_end(line, i);
                     continue;
                 }
                 b':' => {
-                    // {:else} / {:else if} — dedent this line, net zero.
+                    // {:else} — dedent this line, net zero.
                     if !seen_opener {
                         leading_closers += 1;
                     }
@@ -569,6 +590,17 @@ fn analyze_line(line: &str) -> (usize, usize, usize, Option<bool>) {
         i += utf8_len(b[i]);
     }
     (leading_closers, opens, closes, pending)
+}
+
+/// How many indent levels a structural block-closer closes. `{/switch}` closes
+/// two — the switch level plus the current arm's body level; every other
+/// closer (`</tag>`, `{/if}`, …) closes one.
+fn closer_dedent(closer: &str) -> usize {
+    if closer.trim_start().starts_with("{/switch") {
+        2
+    } else {
+        1
+    }
 }
 
 /// Trailing structural block-closers on a line: ree `{/kw}` or non-void HTML
@@ -1223,13 +1255,126 @@ mod tests {
     fn full_studio_fixture_with_closer_returns_to_column_zero() {
         let source = include_str!("../test-files/index.ree");
         let output = fmt(source);
-        assert!(output.ends_with("\n\t</div>\n{/with}\n"), "unexpected fixture tail:\n{}", output.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
+        assert!(output.ends_with("\n{/with}\n"), "{{/with}} must return to column zero; unexpected fixture tail:\n{}", output.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"));
     }
 
     #[test]
     fn ree_else_dedents() {
         let input = "{#if a}\n<p>1</p>\n{:else}\n<p>2</p>\n{/if}\n";
         assert_eq!(fmt(input), "{#if a}\n\t<p>1</p>\n{:else}\n\t<p>2</p>\n{/if}\n");
+    }
+
+    #[test]
+    fn switch_indents_cases_and_bodies() {
+        let input = concat!(
+            "{#switch x }\n",
+            "{#case 10}\n",
+            "<h1>Its 10</h1>\n",
+            "{#case 100}\n",
+            "<h1>Its 100</h1>\n",
+            "{:else}\n",
+            "<h1>Something else</h1>\n",
+            "{/switch}\n",
+        );
+        let expected = concat!(
+            "{#switch x }\n",
+            "\t{#case 10}\n",
+            "\t\t<h1>Its 10</h1>\n",
+            "\t{#case 100}\n",
+            "\t\t<h1>Its 100</h1>\n",
+            "\t{:else}\n",
+            "\t\t<h1>Something else</h1>\n",
+            "{/switch}\n",
+        );
+        assert_eq!(fmt(input), expected, "got:\n{}", fmt(input));
+        assert_eq!(fmt(&expected), expected, "must be idempotent");
+    }
+
+    #[test]
+    fn switch_nested_in_markup_keeps_structural_depth() {
+        // The switch sits inside a <div>; its own levels are relative to that
+        // structural base, not to the author's (bad) indentation.
+        let input = concat!(
+            "<div>\n",
+            "\t{#switch x }\n",
+            "\t\t{#case 1}\n",
+            "\t\t\t<p>one</p>\n",
+            "\t\t{/switch}\n",
+            "</div>\n",
+        );
+        let expected = concat!(
+            "<div>\n",
+            "\t{#switch x }\n",
+            "\t\t{#case 1}\n",
+            "\t\t\t<p>one</p>\n",
+            "\t{/switch}\n",
+            "</div>\n",
+        );
+        assert_eq!(fmt(input), expected, "got:\n{}", fmt(input));
+        assert_eq!(fmt(&expected), expected, "must be idempotent");
+    }
+
+    #[test]
+    fn switch_fixes_author_overindent() {
+        // The kitchen_sink failure mode: everything one level too shallow and
+        // {:else}/{/switch} ragged. Rule 2 pulls it all to structural depth.
+        let input = concat!(
+            "\t{#switch x }\n",
+            "\t{#case 10}\n",
+            "\t<h1>It's 10</h1>\n",
+            "\t{#case 100}\n",
+            "\t<h1>It's 100</h1>\n",
+            "\t{:else}\n",
+            "\t<h1>Something else</h1>\n",
+            "\t{/switch}\n",
+        );
+        let expected = concat!(
+            "{#switch x }\n",
+            "\t{#case 10}\n",
+            "\t\t<h1>It's 10</h1>\n",
+            "\t{#case 100}\n",
+            "\t\t<h1>It's 100</h1>\n",
+            "\t{:else}\n",
+            "\t\t<h1>Something else</h1>\n",
+            "{/switch}\n",
+        );
+        assert_eq!(fmt(input), expected, "got:\n{}", fmt(input));
+        assert_eq!(fmt(&expected), expected, "must be idempotent");
+    }
+
+    #[test]
+    fn switch_with_nested_blocks_dedents_all_levels() {
+        let input = concat!(
+            "{#switch x }\n",
+            "{#case 10}\n",
+            "{#if a}\n",
+            "<p>yes</p>\n",
+            "{/if}\n",
+            "{#case 100}\n",
+            "<p>hundred</p>\n",
+            "{/switch}\n",
+        );
+        let expected = concat!(
+            "{#switch x }\n",
+            "\t{#case 10}\n",
+            "\t\t{#if a}\n",
+            "\t\t\t<p>yes</p>\n",
+            "\t\t{/if}\n",
+            "\t{#case 100}\n",
+            "\t\t<p>hundred</p>\n",
+            "{/switch}\n",
+        );
+        assert_eq!(fmt(input), expected, "got:\n{}", fmt(input));
+        assert_eq!(fmt(&expected), expected, "must be idempotent");
+    }
+
+    #[test]
+    fn switch_with_trailing_closer_on_content_line() {
+        // `{/switch}` glued to the end of a body line still closes both levels:
+        // the line is split at the trailing closer, which lands at column zero.
+        let input = "{#switch x }\n{#case 1}<p>one</p>{/switch}\n";
+        let expected = "{#switch x }\n\t{#case 1}<p>one</p>\n{/switch}\n";
+        assert_eq!(fmt(input), expected, "got:\n{}", fmt(input));
     }
 
     #[test]

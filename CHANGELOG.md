@@ -7,6 +7,18 @@
 
 
 
+## [26.08.5] - 2026-08-24
+
+### Added
+- Indenter and reprinter (`--full`) now format `{#switch}`/`{#case}` blocks:
+  cases indent one level under the switch, bodies one level under their case,
+  and `{/switch}` returns to the switch's column. `{:else}` arms indent like
+  cases; the reprinter parses arms into its AST instead of mangling them.
+- Reprinter (`--full`) runs complex `{#case}` and `{#switch}` expressions
+  through the JS formatter (operators, calls, ternaries), leaving simple
+  literals and identifier paths untouched so quoting is never rewritten.
+
+
 ## [26.8.4] - 2026-08-19
 
 ## [26.8.3] - 2026-08-11
