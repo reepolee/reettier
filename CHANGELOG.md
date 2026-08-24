@@ -7,7 +7,7 @@
 
 
 
-## [26.08.5] - 2026-08-24
+## [26.8.5] - 2026-08-24
 
 ### Added
 - Indenter and reprinter (`--full`) now format `{#switch}`/`{#case}` blocks:
