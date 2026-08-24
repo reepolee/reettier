@@ -7,6 +7,16 @@
 
 
 
+## [26.8.6] - 2026-08-24
+
+### Fixed
+- `{#switch}`/`{#case}`/`{:else}` inside `<script>` blocks are no longer
+  fed to the JS formatter as code (which added stray semicolons and
+  flattened nesting). They now indent like markup: the switch at the
+  script's base level, cases one level deeper, bodies two deeper, and
+  `{/switch}` back at the base.
+
+
 ## [26.8.5] - 2026-08-24
 
 ### Added

@@ -268,13 +268,17 @@ fn format_style_content(content: &str, wrap_width: usize, collapse: crate::full:
 }
 
 /// A standalone Ree control token occupying its own line inside a `<script>`.
+/// The payload is the number of nesting levels the token opens/closes: most
+/// blocks do one, `{#switch}`/`{/switch}` do two (the switch plus the current
+/// arm's body).
 enum ReeCtrl {
-    /// Block opener: `{#if …}`, `{#each …}`, `{#with …}` — increases nesting.
-    Open,
-    /// Block clause: `{:else}` — sits at the opener's level.
+    /// Block opener: `{#if …}`, `{#each …}`, `{#with …}`, `{#switch …}`.
+    Open(usize),
+    /// Block clause: `{:else}` / `{#case …}` — sits one level under the body
+    /// and leaves depth unchanged.
     Mid,
-    /// Block closer: `{/if}`, `{/each}`, `{/with}` — decreases nesting.
-    Close,
+    /// Block closer: `{/if}`, `{/each}`, `{/with}`, `{/switch}`.
+    Close(usize),
 }
 
 /// Classify a trimmed line as a standalone Ree control token.
@@ -294,14 +298,24 @@ fn classify_ree_control(trimmed: &str) -> Option<ReeCtrl> {
     let inner = trimmed[1..end].trim();
     if let Some(rest) = inner.strip_prefix('#') {
         let kw = rest.trim_start().split(char::is_whitespace).next().unwrap_or("");
-        return matches!(kw, "if" | "each" | "with").then_some(ReeCtrl::Open);
+        return match kw {
+            "switch" => Some(ReeCtrl::Open(2)),
+            "if" | "each" | "with" => Some(ReeCtrl::Open(1)),
+            // {#case …} is a switch-arm label, like {:else}.
+            "case" => Some(ReeCtrl::Mid),
+            _ => None,
+        };
     }
     if let Some(rest) = inner.strip_prefix(':') {
         // The engine supports only a bare `{:else}` — no `{:else if …}`.
         return (rest.trim_start() == "else").then_some(ReeCtrl::Mid);
     }
     if let Some(rest) = inner.strip_prefix('/') {
-        return matches!(rest.trim(), "if" | "each" | "with").then_some(ReeCtrl::Close);
+        return match rest.trim() {
+            "switch" => Some(ReeCtrl::Close(2)),
+            "if" | "each" | "with" => Some(ReeCtrl::Close(1)),
+            _ => None,
+        };
     }
     None
 }
@@ -380,13 +394,13 @@ fn format_js_fragment(bare_js: &str, remove_unused: bool) -> String {
 
 /// Format the content inside a `<script>` tag.
 ///
-/// The Ree parser already structures top-level `{#if}`/`{#each}`/`{#with}`
-/// blocks inside scripts (each control token on its own line, body indented).
-/// This function preserves that structure: it splits the script into JS runs
-/// separated by standalone Ree control tokens, formats each JS run through SWC
-/// independently, and re-indents both runs and tokens according to the block
-/// nesting depth. Control tokens are NEVER fed to SWC — doing so was what caused
-/// them to be flattened and to acquire spurious trailing semicolons.
+/// The Ree parser already structures top-level `{#if}`/`{#each}`/`{#with}`/
+/// `{#switch}` blocks inside scripts (each control token on its own line, body
+/// indented). This function preserves that structure: it splits the script into
+/// JS runs separated by standalone Ree control tokens, formats each JS run
+/// through SWC independently, and re-indents both runs and tokens according to
+/// the block nesting depth. Control tokens are NEVER fed to SWC — doing so was
+/// what caused them to be flattened and to acquire spurious trailing semicolons.
 fn format_script_content(content: &str, wrap_width: usize, collapse: crate::full::format::CollapseConfig, remove_unused: bool) -> String {
     if content.trim().is_empty() {
         return String::new();
@@ -411,15 +425,15 @@ fn format_script_content(content: &str, wrap_width: usize, collapse: crate::full
                 flush_js_run(&run, base_tabs, depth, wrap_width, collapse, remove_unused, &mut out);
                 run.clear();
                 match ctrl {
-                    ReeCtrl::Open => {
+                    ReeCtrl::Open(n) => {
                         emit_ctrl(&mut out, base_tabs + depth, token);
-                        depth += 1;
+                        depth += n;
                     }
                     ReeCtrl::Mid => {
                         emit_ctrl(&mut out, base_tabs + depth.saturating_sub(1), token);
                     }
-                    ReeCtrl::Close => {
-                        depth = depth.saturating_sub(1);
+                    ReeCtrl::Close(n) => {
+                        depth = depth.saturating_sub(n);
                         emit_ctrl(&mut out, base_tabs + depth, token);
                     }
                 }
@@ -680,12 +694,60 @@ mod tests {
 
     #[test]
     fn classify_ree_control_matches_block_tokens() {
-        assert!(matches!(classify_ree_control("{#if x}"), Some(ReeCtrl::Open)));
-        assert!(matches!(classify_ree_control("{#each items as i}"), Some(ReeCtrl::Open)));
-        assert!(matches!(classify_ree_control("{#with props}"), Some(ReeCtrl::Open)));
+        assert!(matches!(classify_ree_control("{#if x}"), Some(ReeCtrl::Open(1))));
+        assert!(matches!(classify_ree_control("{#each items as i}"), Some(ReeCtrl::Open(1))));
+        assert!(matches!(classify_ree_control("{#with props}"), Some(ReeCtrl::Open(1))));
+        assert!(matches!(classify_ree_control("{#switch x}"), Some(ReeCtrl::Open(2))));
+        assert!(matches!(classify_ree_control("{#case 10}"), Some(ReeCtrl::Mid)));
         assert!(matches!(classify_ree_control("{:else}"), Some(ReeCtrl::Mid)));
         assert!(classify_ree_control("{:else if y}").is_none(), "there is no {{:else if}} in .ree templates");
-        assert!(matches!(classify_ree_control("{/if}"), Some(ReeCtrl::Close)));
+        assert!(matches!(classify_ree_control("{/if}"), Some(ReeCtrl::Close(1))));
+        assert!(matches!(classify_ree_control("{/switch}"), Some(ReeCtrl::Close(2))));
+    }
+
+    #[test]
+    fn script_switch_block_nests_cases_and_bodies() {
+        // Regression: `{#switch}`/`{#case}` inside <script> were fed to SWC as
+        // JS (gaining spurious `;`) and flattened to one depth. They must nest
+        // like the markup indenter: switch at base, cases one deeper, bodies two
+        // deeper, `{/switch}` back at base.
+        let src = concat!(
+            "{#with props}\n",
+            "\t<script>\n",
+            "\t\t{#switch x}\n",
+            "\t\t{#case 10}\n",
+            "\t\tdoThing10();\n",
+            "\t\t{#case 100}\n",
+            "\t\tdoThing100();\n",
+            "\t\t{:else}\n",
+            "\t\tdoThingElse();\n",
+            "\t\t{/switch}\n",
+            "\t</script>\n",
+            "{/with}\n",
+        );
+        let out = format_ree_content(src, 120, 0, cfg(), false);
+        let expected = concat!(
+            "{#with props}\n",
+            "\t<script>\n",
+            "\t\t{#switch x}\n",
+            "\t\t\t{#case 10}\n",
+            "\t\t\t\tdoThing10();\n",
+            "\t\t\t{#case 100}\n",
+            "\t\t\t\tdoThing100();\n",
+            "\t\t\t{:else}\n",
+            "\t\t\t\tdoThingElse();\n",
+            "\t\t{/switch}\n",
+            "\t</script>\n",
+            "{/with}\n",
+        );
+        assert_eq!(out, expected, "got:\n{out}");
+        // No spurious semicolons on the control tokens.
+        assert!(!out.contains("{#switch x};"));
+        assert!(!out.contains("{#case 10};"));
+        assert!(!out.contains("{/switch};"));
+        // Idempotent.
+        let out2 = format_ree_content(&out, 120, 0, cfg(), false);
+        assert_eq!(out, out2, "switch-in-script should be idempotent");
     }
 
     #[test]
