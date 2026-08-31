@@ -74,14 +74,16 @@ fn normalize_broken_tag_attributes(src: &str) -> String {
         let src_bytes = src.as_bytes();
         let next_byte = src_bytes.get(open + 1);
         let is_opening_tag = next_byte.is_some_and(|byte| byte.is_ascii_alphabetic());
-        let close_relative = if is_opening_tag {
-            find_opening_tag_end(&src[open..])
-        } else {
-            None
-        };
+        if !is_opening_tag {
+            out.push('<');
+            start = open + 1;
+            continue;
+        }
+        let close_relative = find_opening_tag_end(&src[open..]);
         let Some(close_relative) = close_relative else {
-            out.push_str(&src[open..]);
-            return out;
+            out.push('<');
+            start = open + 1;
+            continue;
         };
         let close = open + close_relative;
         let tag = &src[open..=close];
@@ -1658,6 +1660,14 @@ mod tests {
     fn multi_line_tag_attributes_collapse_without_first_boundary_break() {
         let input = "<div>\n<a\nhref=\"/x\" class=\"btn\" data-track=\"nav\">\nlink\n</a>\n</div>\n";
         let expected = "<div>\n\t<a href=\"/x\" class=\"btn\" data-track=\"nav\">\n\t\tlink\n\t</a>\n</div>\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected, "not idempotent");
+    }
+
+    #[test]
+    fn multi_line_tag_attributes_after_closed_element() {
+        let input = "<div>\n<label>Filter</label>\n<button\ntype=\"button\"\nclass=\"button\" data-mode=\"newest\">{_ sort_newest}\n</button>\n</div>\n";
+        let expected = "<div>\n\t<label>Filter</label>\n\t<button\n\t\ttype=\"button\"\n\t\tclass=\"button\"\n\t\tdata-mode=\"newest\"\n\t>\n\t\t{_ sort_newest}\n\t</button>\n</div>\n";
         assert_eq!(fmt(input), expected);
         assert_eq!(fmt(&expected), expected, "not idempotent");
     }
