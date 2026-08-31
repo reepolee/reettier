@@ -55,8 +55,135 @@ fn strip(s: &str) -> String {
 
 fn format_ree_inner(src: &str, indent: &str, wrap_markup: bool, wrap_width: usize) -> String {
     let (masked, blocks) = extract_blocks(src, indent);
-    let wrapped = if wrap_markup { wrap_markup_lines(&masked, wrap_width) } else { masked };
+    let normalized = normalize_broken_tag_attributes(&masked);
+    let wrapped = if wrap_markup { wrap_markup_lines(&normalized, wrap_width) } else { normalized };
     indent_markup(&wrapped, indent, &blocks)
+}
+
+/// Apply Rule 4 to opening-tag attributes. A newline at the boundary between
+/// the first and second attributes explodes the entire attribute group;
+/// otherwise a manually wrapped opening tag collapses back to one line.
+fn normalize_broken_tag_attributes(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut start = 0usize;
+
+    while let Some(relative_open) = src[start..].find('<') {
+        let open = start + relative_open;
+        out.push_str(&src[start..open]);
+
+        let src_bytes = src.as_bytes();
+        let next_byte = src_bytes.get(open + 1);
+        let is_opening_tag = next_byte.is_some_and(|byte| byte.is_ascii_alphabetic());
+        let close_relative = if is_opening_tag {
+            find_opening_tag_end(&src[open..])
+        } else {
+            None
+        };
+        let Some(close_relative) = close_relative else {
+            out.push_str(&src[open..]);
+            return out;
+        };
+        let close = open + close_relative;
+        let tag = &src[open..=close];
+        if tag.contains('\n') {
+            let normalized_tag = normalize_multiline_opening_tag(tag);
+            let closes_on_own_line = normalized_tag.ends_with("\n>") || normalized_tag.ends_with("\n/>");
+            out.push_str(&normalized_tag);
+            start = close + 1;
+            let suffix = &src[start..];
+            if closes_on_own_line && !suffix.starts_with('\n') {
+                out.push('\n');
+            }
+        } else {
+            out.push_str(tag);
+            start = close + 1;
+        }
+    }
+
+    out.push_str(&src[start..]);
+    out
+}
+
+fn normalize_multiline_opening_tag(tag: &str) -> String {
+    let name_boundary = tag[1..].find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/');
+    let name_end = match name_boundary {
+        Some(position) => position + 1,
+        None => tag.len() - 1,
+    };
+    let name = &tag[..name_end];
+    let mut rest = tag[name_end..tag.len() - 1].trim();
+    let self_closing = rest.ends_with('/');
+    if self_closing {
+        rest = rest[..rest.len() - 1].trim_end();
+    }
+
+    let mut attrs = Vec::new();
+    let mut attr_start = 0usize;
+    let mut quote = None;
+    let mut brace_depth = 0usize;
+    let mut first_boundary_broken = false;
+    for (index, ch) in rest.char_indices() {
+        if quote == Some(ch) {
+            quote = None;
+            continue;
+        }
+        if quote.is_none() && (ch == '"' || ch == '\'') {
+            quote = Some(ch);
+            continue;
+        }
+        if quote.is_none() && ch == '{' {
+            brace_depth += 1;
+            continue;
+        }
+        if quote.is_none() && ch == '}' {
+            brace_depth = brace_depth.saturating_sub(1);
+            continue;
+        }
+        if quote.is_none() && brace_depth == 0 && ch.is_ascii_whitespace() {
+            let attr = rest[attr_start..index].trim();
+            if !attr.is_empty() {
+                attrs.push(attr);
+                if attrs.len() == 1 {
+                    let whitespace = &rest[index..];
+                    let whitespace_chars = whitespace.chars();
+                    let mut boundary_whitespace = whitespace_chars.take_while(|next| next.is_ascii_whitespace());
+                    first_boundary_broken = boundary_whitespace.any(|next| next == '\n');
+                }
+            }
+            attr_start = index + ch.len_utf8();
+        }
+    }
+    let attr = rest[attr_start..].trim();
+    if !attr.is_empty() {
+        attrs.push(attr);
+    }
+
+    if attrs.len() < 2 {
+        return tag.to_string();
+    }
+
+    if !first_boundary_broken {
+        let attrs = attrs.join(" ");
+        return if self_closing {
+            format!("{} {}/>", name, attrs)
+        } else {
+            format!("{} {}>", name, attrs)
+        };
+    }
+
+    let mut normalized = String::new();
+    normalized.push_str(name);
+    for attr in attrs {
+        normalized.push('\n');
+        normalized.push_str(attr);
+    }
+    normalized.push('\n');
+    if self_closing {
+        normalized.push_str("/>");
+    } else {
+        normalized.push('>');
+    }
+    normalized
 }
 
 fn wrap_markup_lines(src: &str, width: usize) -> String {
@@ -1517,14 +1644,22 @@ mod tests {
 
     #[test]
     fn multi_line_tag_attributes_indent() {
-        let input = "<div>\n<a\nhref=\"/x\"\nclass=\"btn\"\n>\nlink\n</a>\n</div>\n";
+        let input = "<div>\n<a\nhref=\"/x\"\nclass=\"btn\" data-track=\"nav\"\n>\nlink\n</a>\n</div>\n";
         let out = fmt(input);
         assert_eq!(
             out,
-            "<div>\n\t<a\n\t\thref=\"/x\"\n\t\tclass=\"btn\"\n\t>\n\t\tlink\n\t</a>\n</div>\n",
+            "<div>\n\t<a\n\t\thref=\"/x\"\n\t\tclass=\"btn\"\n\t\tdata-track=\"nav\"\n\t>\n\t\tlink\n\t</a>\n</div>\n",
             "got:\n{out}"
         );
         assert_eq!(fmt(&out), out, "not idempotent");
+    }
+
+    #[test]
+    fn multi_line_tag_attributes_collapse_without_first_boundary_break() {
+        let input = "<div>\n<a\nhref=\"/x\" class=\"btn\" data-track=\"nav\">\nlink\n</a>\n</div>\n";
+        let expected = "<div>\n\t<a href=\"/x\" class=\"btn\" data-track=\"nav\">\n\t\tlink\n\t</a>\n</div>\n";
+        assert_eq!(fmt(input), expected);
+        assert_eq!(fmt(&expected), expected, "not idempotent");
     }
 
     #[test]
